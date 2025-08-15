@@ -2,7 +2,7 @@
 
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, serialize};
-use ethrex_trie::{Node, NodeHash, TrieError};
+use crate::trie::{error::TrieError, node::Node, node_hash::NodeHash};
 use std::path::PathBuf;
 
 /// Ethrex DB struct
@@ -158,8 +158,9 @@ impl EthrexDB {
 
 #[cfg(test)]
 mod tests {
+    use crate::trie::trie::{InMemoryTrieDB, Trie};
+
     use super::*;
-    use ethrex_trie::{InMemoryTrieDB, Node, Trie};
     use tempdir::TempDir;
 
     #[test]

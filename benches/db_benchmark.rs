@@ -1,8 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use ethrex_storage::trie_db::libmdbx::LibmdbxTrieDB;
-use ethrex_storage::trie_db::test_utils::libmdbx::TestNodes;
-use ethrex_trie::{InMemoryTrieDB, Trie};
 use ethrexdb::EthrexDB;
+use ethrexdb::trie::trie::{InMemoryTrieDB, Trie};
 use libmdbx::orm::{Database, Decodable, Encodable, Table, table_info};
 use libmdbx::{DatabaseOptions, Mode, PageSize, ReadWriteOptions, table};
 use rand::{seq::SliceRandom, thread_rng};
@@ -31,6 +29,49 @@ table!(
     /// Path-based table for storing key-value pairs directly by path
     (PathNodes) PathKey => Vec<u8>
 );
+
+table!(
+    /// Hash-based table for storing trie nodes by their hash
+    (TestNodes) Vec<u8> => Vec<u8>
+);
+
+// Simple TrieDB implementation for benchmarking
+struct LibmdbxTrieDB {
+    db: Arc<Database>,
+}
+
+impl LibmdbxTrieDB {
+    fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+use ethrexdb::trie::{error::TrieError, node_hash::NodeHash, trie::TrieDB};
+
+impl TrieDB for LibmdbxTrieDB {
+    fn get(&self, key: NodeHash) -> Result<Option<Vec<u8>>, TrieError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| TrieError::DbError(e.to_string()))?;
+        let key_bytes: Vec<u8> = key.into();
+        txn.get::<TestNodes>(key_bytes)
+            .map_err(|e| TrieError::DbError(e.to_string()))
+    }
+
+    fn put_batch(&self, key_values: Vec<(NodeHash, Vec<u8>)>) -> Result<(), TrieError> {
+        let txn = self
+            .db
+            .begin_readwrite()
+            .map_err(|e| TrieError::DbError(e.to_string()))?;
+        for (key, value) in key_values {
+            let key_bytes: Vec<u8> = key.into();
+            txn.upsert::<TestNodes>(key_bytes, value)
+                .map_err(|e| TrieError::DbError(e.to_string()))?;
+        }
+        txn.commit().map_err(|e| TrieError::DbError(e.to_string()))
+    }
+}
 
 // Generate test data (key = hash, value = account info)
 fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -87,7 +128,7 @@ struct LibmdbxHashDB {
 impl LibmdbxHashDB {
     fn new(temp_dir: &std::path::Path) -> Self {
         let db = create_libmdbx_db::<TestNodes>(temp_dir.into());
-        let trie = Trie::new(Box::new(LibmdbxTrieDB::<TestNodes>::new(db.clone())));
+        let trie = Trie::new(Box::new(LibmdbxTrieDB::new(db.clone())));
         Self { trie }
     }
 

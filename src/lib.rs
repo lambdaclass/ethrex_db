@@ -7,4 +7,8 @@ mod file_manager;
 /// Serialization and deserialization of the trie.
 mod serialization;
 
+// ETHREX COPY STRUCTURES
+mod rlp;
+pub mod trie;
+
 pub use db::EthrexDB;

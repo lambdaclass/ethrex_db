@@ -12,9 +12,14 @@
 
 use std::sync::{Arc, OnceLock};
 
-// TODO: I'm using the ethrex-trie crate from my local repo because `BranchNode`, `LeafNode` and
-// `ExtensionNode` are private in the `ethrex-trie` crate.
-use ethrex_trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeRef, TrieError};
+use crate::trie::{
+    branch::BranchNode,
+    error::TrieError,
+    extension::ExtensionNode,
+    leaf::LeafNode,
+    nibbles::Nibbles,
+    node::{Node, NodeRef},
+};
 
 /// Tag for Branch node (16 children + 1 value)
 const TAG_BRANCH: u8 = 0;
@@ -510,7 +515,8 @@ pub fn serialize(node: &Node) -> Vec<u8> {
 
 #[cfg(test)]
 mod test {
-    use ethrex_trie::{InMemoryTrieDB, NodeHash, Trie};
+    use crate::trie::node_hash::NodeHash;
+    use crate::trie::trie::{InMemoryTrieDB, Trie};
 
     use super::*;
 

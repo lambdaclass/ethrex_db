@@ -7,20 +7,23 @@ keywords = ["database", "merkle", "patricia", "trie"]
 categories = ["database-implementations"]
 
 [dependencies]
+bytes = { version = "1.6.0", features = ["serde"] }
+ethereum-types = { version = "0.15.1", features = ["serialize"] }
+lazy_static = "1.5.0"
 memmap2 = "0.9.7"
-
-# ethrex
-# FIXME: Using local repo
-ethrex-trie = { path = "../ethrex/crates/common/trie/" }
+sha3 = "0.10.8"
+thiserror = "2.0.9"
+tinyvec = "1.6.0"
 
 [dev-dependencies]
 anyhow = "1.0.86"
+cita_trie = "4.0.0"          # used for proptest comparisons
 criterion = { version = "0.5", features = ["html_reports"] }
-# FIXME: Using local repo
-ethrex-storage = { path = "../ethrex/crates/storage/" , features = ["libmdbx"] }
+hasher = "0.1.4"             # cita_trie needs this
+hex-literal = "0.4.1"
 libmdbx = { version = "=0.5.3", features = ["orm"] }
+proptest = "1.0.0"
 rand = "0.8.5"
-sha3 = "0.10.8"
 tempdir = "0.3.7"
 
 [[bench]]

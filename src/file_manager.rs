@@ -1,4 +1,4 @@
-use ethrex_trie::TrieError;
+use crate::trie::error::TrieError;
 use memmap2::{Mmap, MmapOptions};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
