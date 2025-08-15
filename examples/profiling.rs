@@ -1,6 +1,6 @@
 use ethrexdb::{
     EthrexDB,
-    trie::trie::{InMemoryTrieDB, Trie},
+    trie::{InMemoryTrieDB, Trie},
 };
 use rand::{Rng, thread_rng};
 use std::time::Instant;

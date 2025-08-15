@@ -1,13 +1,9 @@
 use crate::{
-    rlp::structs::Encoder,
+    rlp::Encoder,
     trie::{
-        branch::BranchNode,
-        error::TrieError,
-        extension::ExtensionNode,
-        nibbles::Nibbles,
-        node::{Node, ValueOrHash},
-        node_hash::NodeHash,
-        trie::ValueRLP,
+        BranchNode, ExtensionNode,
+        Nibbles, NodeHash, TrieError,
+        Node, ValueOrHash, ValueRLP,
     },
 };
 
@@ -148,7 +144,7 @@ impl LeafNode {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{pmt_node, trie::trie::Trie};
+    use crate::{pmt_node, trie::Trie};
 
     #[test]
     fn new() {

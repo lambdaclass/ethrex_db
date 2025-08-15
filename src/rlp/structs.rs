@@ -1,7 +1,7 @@
 use super::{
-    decode::{RLPDecode, decode_rlp_item, get_item_with_prefix},
-    encode::{RLPEncode, encode_length},
-    error::RLPDecodeError,
+    RLPDecode, RLPEncode, RLPDecodeError,
+    decode::{decode_rlp_item, get_item_with_prefix},
+    encode::encode_length,
 };
 use bytes::BufMut;
 use bytes::Bytes;

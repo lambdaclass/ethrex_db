@@ -4,11 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tinyvec::ArrayVec;
 
 use crate::{
-    rlp::structs::Encoder,
-    trie::{branch::BranchNode, extension::ExtensionNode, leaf::LeafNode, node::Node},
+    rlp::{Encoder, RLP_NULL},
+    trie::{BranchNode, ExtensionNode, LeafNode, Node},
 };
-
-use super::constants::RLP_NULL;
 
 pub trait RLPEncode {
     fn encode(&self, buf: &mut dyn BufMut);

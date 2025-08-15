@@ -1,4 +1,4 @@
-use crate::rlp::error::RLPDecodeError;
+use crate::rlp::RLPDecodeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

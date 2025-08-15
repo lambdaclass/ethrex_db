@@ -4,23 +4,13 @@ use std::{
 };
 
 use crate::{
-    rlp::{
-        decode::{RLPDecode, decode_bytes},
-        encode::RLPEncode,
-        error::RLPDecodeError,
-        structs::Decoder,
-    },
+    rlp::{RLPDecode, RLPDecodeError, Decoder, decode::decode_bytes, RLPEncode},
     trie::{
-        branch::BranchNode,
-        extension::ExtensionNode,
-        leaf::LeafNode,
-        nibbles::Nibbles,
-        node_hash::NodeHash,
-        trie::{TrieDB, ValueRLP},
+        BranchNode, ExtensionNode, LeafNode,
+        Nibbles, NodeHash, TrieError,
+        TrieDB, ValueRLP,
     },
 };
-
-use crate::trie::error::TrieError;
 
 /// A reference to a node.
 #[derive(Clone, Debug)]

@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ethrexdb::EthrexDB;
-use ethrexdb::trie::trie::{InMemoryTrieDB, Trie};
+use ethrexdb::trie::{InMemoryTrieDB, Trie};
 use libmdbx::orm::{Database, Decodable, Encodable, Table, table_info};
 use libmdbx::{DatabaseOptions, Mode, PageSize, ReadWriteOptions, table};
 use rand::{seq::SliceRandom, thread_rng};
@@ -46,7 +46,7 @@ impl LibmdbxTrieDB {
     }
 }
 
-use ethrexdb::trie::{error::TrieError, node_hash::NodeHash, trie::TrieDB};
+use ethrexdb::trie::{TrieDB, TrieError, NodeHash};
 
 impl TrieDB for LibmdbxTrieDB {
     fn get(&self, key: NodeHash) -> Result<Option<Vec<u8>>, TrieError> {

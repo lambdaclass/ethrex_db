@@ -13,12 +13,8 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::trie::{
-    branch::BranchNode,
-    error::TrieError,
-    extension::ExtensionNode,
-    leaf::LeafNode,
-    nibbles::Nibbles,
-    node::{Node, NodeRef},
+    BranchNode, ExtensionNode, LeafNode,
+    TrieError, Nibbles, Node, NodeRef,
 };
 
 /// Tag for Branch node (16 children + 1 value)
@@ -515,8 +511,7 @@ pub fn serialize(node: &Node) -> Vec<u8> {
 
 #[cfg(test)]
 mod test {
-    use crate::trie::node_hash::NodeHash;
-    use crate::trie::trie::{InMemoryTrieDB, Trie};
+    use crate::trie::{InMemoryTrieDB, Trie, node_hash::NodeHash};
 
     use super::*;
 

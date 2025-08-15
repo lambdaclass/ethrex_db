@@ -1,16 +1,6 @@
 use crate::{
-    rlp::{
-        constants::{RLP_EMPTY_LIST, RLP_NULL},
-        error::RLPDecodeError,
-        structs::Decoder,
-    },
-    trie::{
-        branch::BranchNode,
-        extension::ExtensionNode,
-        leaf::LeafNode,
-        node::{Node, NodeRef},
-        node_hash::NodeHash,
-    },
+    rlp::{RLP_EMPTY_LIST, RLP_NULL, RLPDecodeError, Decoder},
+    trie::{BranchNode, ExtensionNode, LeafNode, Node, NodeRef, NodeHash},
 };
 use bytes::{Bytes, BytesMut};
 use ethereum_types::{

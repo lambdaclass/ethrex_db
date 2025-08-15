@@ -1,12 +1,9 @@
 use crate::{
-    rlp::structs::Encoder,
+    rlp::Encoder,
     trie::{
-        branch::BranchNode,
-        error::TrieError,
-        nibbles::Nibbles,
-        node::{Node, NodeRef, ValueOrHash},
-        node_hash::NodeHash,
-        trie::{TrieDB, ValueRLP},
+        BranchNode, Nibbles, NodeHash, TrieError,
+        Node, NodeRef, ValueOrHash,
+        TrieDB, ValueRLP,
     },
 };
 
@@ -190,7 +187,7 @@ mod test {
     use super::*;
     use crate::{
         pmt_node,
-        trie::{leaf::LeafNode, trie::Trie},
+        trie::{Trie, leaf::LeafNode},
     };
 
     #[test]

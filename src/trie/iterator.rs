@@ -1,7 +1,6 @@
 use crate::trie::{
-    nibbles::Nibbles,
-    node::{Node, NodeRef},
-    trie::{PathRLP, Trie, TrieDB, ValueRLP},
+    Nibbles, Node, NodeRef,
+    PathRLP, Trie, TrieDB, ValueRLP,
 };
 
 pub struct TrieIterator {
