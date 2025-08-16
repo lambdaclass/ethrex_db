@@ -1,34 +1,29 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ethrexdb::EthrexDB;
-use ethrexdb::trie::{InMemoryTrieDB, Trie};
+use ethrexdb::trie::{InMemoryTrieDB, NodeHash, Trie, TrieDB, TrieError};
 use libmdbx::orm::{Database, Decodable, Encodable, Table, table_info};
 use libmdbx::{DatabaseOptions, Mode, PageSize, ReadWriteOptions, table};
 use rand::{seq::SliceRandom, thread_rng};
 use sha3::{Digest, Keccak256};
 use std::{sync::Arc, time::Duration};
-
 use tempdir::TempDir;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PathKey(Vec<u8>);
+fn create_libmdbx_db<T: Table>(path: std::path::PathBuf) -> Arc<Database> {
+    let tables = [table_info!(T)].into_iter().collect();
+    let options = DatabaseOptions {
+        page_size: Some(PageSize::Set(4096)),
+        mode: Mode::ReadWrite(ReadWriteOptions {
+            max_size: Some(1024 * 1024 * 1024),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
 
-impl Encodable for PathKey {
-    type Encoded = Vec<u8>;
-    fn encode(self) -> Self::Encoded {
-        self.0
-    }
+    Arc::new(
+        Database::create_with_options(Some(path), options, &tables)
+            .expect("Failed to create LibMDBX database"),
+    )
 }
-
-impl Decodable for PathKey {
-    fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        Ok(PathKey(b.to_vec()))
-    }
-}
-
-table!(
-    /// Path-based table for storing key-value pairs directly by path
-    (PathNodes) PathKey => Vec<u8>
-);
 
 table!(
     /// Hash-based table for storing trie nodes by their hash
@@ -45,8 +40,6 @@ impl LibmdbxTrieDB {
         Self { db }
     }
 }
-
-use ethrexdb::trie::{TrieDB, TrieError, NodeHash};
 
 impl TrieDB for LibmdbxTrieDB {
     fn get(&self, key: NodeHash) -> Result<Option<Vec<u8>>, TrieError> {
@@ -70,6 +63,75 @@ impl TrieDB for LibmdbxTrieDB {
                 .map_err(|e| TrieError::DbError(e.to_string()))?;
         }
         txn.commit().map_err(|e| TrieError::DbError(e.to_string()))
+    }
+}
+
+struct LibmdbxHashDB {
+    trie: Trie,
+}
+
+impl LibmdbxHashDB {
+    fn new(temp_dir: &std::path::Path) -> Self {
+        let db = create_libmdbx_db::<TestNodes>(temp_dir.into());
+        let trie = Trie::new(Box::new(LibmdbxTrieDB::new(db.clone())));
+        Self { trie }
+    }
+
+    fn insert_batch(&mut self, data: &[(Vec<u8>, Vec<u8>)]) {
+        for (key, value) in data {
+            self.trie.insert(key.clone(), value.clone()).unwrap();
+        }
+        self.trie.commit().unwrap();
+    }
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.trie.get(&key.to_vec()).unwrap()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathKey(Vec<u8>);
+
+impl Encodable for PathKey {
+    type Encoded = Vec<u8>;
+    fn encode(self) -> Self::Encoded {
+        self.0
+    }
+}
+
+impl Decodable for PathKey {
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        Ok(PathKey(b.to_vec()))
+    }
+}
+
+table!(
+    /// Path-based table for storing key-value pairs directly by path
+    (PathNodes) PathKey => Vec<u8>
+);
+
+struct LibmdbxSnapshotPathDB {
+    db: Arc<Database>,
+}
+
+impl LibmdbxSnapshotPathDB {
+    fn new(temp_dir: &std::path::Path) -> Self {
+        let db = create_libmdbx_db::<PathNodes>(temp_dir.into());
+        Self { db }
+    }
+
+    fn insert_batch(&self, data: &[(Vec<u8>, Vec<u8>)]) {
+        let txn = self.db.begin_readwrite().unwrap();
+        for (key, value) in data {
+            txn.upsert::<PathNodes>(PathKey(key.clone()), value.clone())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let txn = self.db.begin_read().unwrap();
+        txn.get::<PathNodes>(PathKey(key.to_vec())).unwrap()
     }
 }
 
@@ -104,73 +166,8 @@ fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-fn create_libmdbx_db<T: Table>(path: std::path::PathBuf) -> Arc<Database> {
-    let tables = [table_info!(T)].into_iter().collect();
-    let options = DatabaseOptions {
-        page_size: Some(PageSize::Set(4096)),
-        mode: Mode::ReadWrite(ReadWriteOptions {
-            max_size: Some(1024 * 1024 * 1024),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    Arc::new(
-        Database::create_with_options(Some(path), options, &tables)
-            .expect("Failed to create LibMDBX database"),
-    )
-}
-
-struct LibmdbxHashDB {
-    trie: Trie,
-}
-
-impl LibmdbxHashDB {
-    fn new(temp_dir: &std::path::Path) -> Self {
-        let db = create_libmdbx_db::<TestNodes>(temp_dir.into());
-        let trie = Trie::new(Box::new(LibmdbxTrieDB::new(db.clone())));
-        Self { trie }
-    }
-
-    fn insert_batch(&mut self, data: &[(Vec<u8>, Vec<u8>)]) {
-        for (key, value) in data {
-            self.trie.insert(key.clone(), value.clone()).unwrap();
-        }
-        self.trie.commit().unwrap();
-    }
-
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.trie.get(&key.to_vec()).unwrap()
-    }
-}
-
-struct LibmdbxPathDB {
-    db: Arc<Database>,
-}
-
-impl LibmdbxPathDB {
-    fn new(temp_dir: &std::path::Path) -> Self {
-        let db = create_libmdbx_db::<PathNodes>(temp_dir.into());
-        Self { db }
-    }
-
-    fn insert_batch(&self, data: &[(Vec<u8>, Vec<u8>)]) {
-        let txn = self.db.begin_readwrite().unwrap();
-        for (key, value) in data {
-            txn.upsert::<PathNodes>(PathKey(key.clone()), value.clone())
-                .unwrap();
-        }
-        txn.commit().unwrap();
-    }
-
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let txn = self.db.begin_read().unwrap();
-        txn.get::<PathNodes>(PathKey(key.to_vec())).unwrap()
-    }
-}
-
-fn batch_insert_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch_insert");
+fn insert_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert");
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(10);
 
@@ -192,18 +189,22 @@ fn batch_insert_benchmark(c: &mut Criterion) {
         });
 
         // Path
-        group.bench_with_input(BenchmarkId::new("libmdbx_path", size), &data, |b, data| {
-            b.iter_with_setup(
-                || {
-                    let temp_dir = TempDir::new("libmdbx_path_bench").unwrap();
-                    LibmdbxPathDB::new(temp_dir.path())
-                },
-                |db| {
-                    db.insert_batch(black_box(data));
-                    black_box(db)
-                },
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("libmdbx_snapshot_path", size),
+            &data,
+            |b, data| {
+                b.iter_with_setup(
+                    || {
+                        let temp_dir = TempDir::new("libmdbx_path_bench").unwrap();
+                        LibmdbxSnapshotPathDB::new(temp_dir.path())
+                    },
+                    |db| {
+                        db.insert_batch(black_box(data));
+                        black_box(db)
+                    },
+                );
+            },
+        );
 
         // EthrexDB
         group.bench_with_input(BenchmarkId::new("ethrex_db", size), &data, |b, data| {
@@ -229,8 +230,8 @@ fn batch_insert_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-fn random_read_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("random_read");
+fn random_get_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("random_get");
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(10);
 
@@ -250,7 +251,7 @@ fn random_read_benchmark(c: &mut Criterion) {
         libmdbx_hash_db.insert_batch(&data);
 
         let libmdbx_path_temp = TempDir::new("libmdbx_path_read").unwrap();
-        let libmdbx_path_db = LibmdbxPathDB::new(libmdbx_path_temp.path());
+        let libmdbx_path_db = LibmdbxSnapshotPathDB::new(libmdbx_path_temp.path());
         libmdbx_path_db.insert_batch(&data);
 
         let ethrex_temp = TempDir::new("ethrex_read").unwrap();
@@ -280,7 +281,7 @@ fn random_read_benchmark(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("libmdbx_path", size),
+            BenchmarkId::new("libmdbx_snapshot_path", size),
             &sample_keys,
             |b, keys| {
                 b.iter(|| {
@@ -318,5 +319,5 @@ fn random_read_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, batch_insert_benchmark, random_read_benchmark);
+criterion_group!(benches, insert_benchmark, random_get_benchmark);
 criterion_main!(benches);
