@@ -13,8 +13,14 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-      - name: Setup Rust Environment
-        uses: ./.github/actions/setup-rust
+      - name: Rustup toolchain install
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.87.0
+          components: rustfmt, clippy
+
+      - name: Add Rust Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Restore cache
         id: cache-loc-report
@@ -49,7 +55,5 @@ jobs:
         if: always()
         run: |
           if [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
-            curl -X POST -H 'Content-type: application/json' \
-              --data @tooling/slack_message.json \
-              "${{ secrets.SLACK_WEBHOOK }}"
+            sh .github/scripts/publish_loc.sh "${{ secrets.SLACK_WEBHOOK }}"
           fi

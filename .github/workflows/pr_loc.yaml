@@ -36,10 +36,14 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.find_merge_base.outputs.merge_base }}
 
-      - name: Setup Rust Environment
-        uses: ./.github/actions/setup-rust
+      - name: Rustup toolchain install
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.87.0
           components: rustfmt, clippy
+
+      - name: Add Rust Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Run Lines of Code Counter for base
         run: cd tooling && make loc-detailed
@@ -54,10 +58,14 @@ jobs:
           clean: "false" # Don't clean the workspace, so we can keep the previous report
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Setup Rust Environment
-        uses: ./.github/actions/setup-rust
+      - name: Rustup toolchain install
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.87.0
           components: rustfmt, clippy
+
+      - name: Add Rust Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Run Lines of Code Counter for PR
         run: cd tooling && make loc-detailed
