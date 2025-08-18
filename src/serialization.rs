@@ -12,10 +12,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::trie::{
-    BranchNode, ExtensionNode, LeafNode,
-    TrieError, Nibbles, Node, NodeRef,
-};
+use crate::trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeRef, TrieError};
 
 /// Tag for Branch node (16 children + 1 value)
 const TAG_BRANCH: u8 = 0;
