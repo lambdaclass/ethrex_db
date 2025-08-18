@@ -1,0 +1,55 @@
+name: Daily Lines of Code Report
+
+on:
+  schedule:
+    # Every day at UTC midnight
+    - cron: "0 0 * * 1,2,3,4,5"
+  workflow_dispatch:
+
+jobs:
+  loc:
+    name: Count ethrex db loc and generate report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Setup Rust Environment
+        uses: ./.github/actions/setup-rust
+
+      - name: Restore cache
+        id: cache-loc-report
+        uses: actions/cache@v4
+        with:
+          path: tooling/loc_report.json
+          key: loc-report-${{ github.ref_name }}
+          restore-keys: |
+            loc-report-
+
+      - name: Rename cached loc_report.json to loc_report.json.old
+        if: steps.cache-loc-report.outputs.cache-hit != ''
+        run: mv tooling/loc_report.json tooling/loc_report.json.old
+
+      - name: Generate the loc report
+        run: |
+          cd tooling && make loc
+
+      - name: Save new loc_report.json to cache
+        if: success()
+        uses: actions/cache@v4
+        with:
+          path: tooling/loc_report.json
+          key: loc-report-${{ github.ref_name }}
+
+      - name: Post results in summary
+        run: |
+          echo "# EthrexDB Lines of Code Report" >> $GITHUB_STEP_SUMMARY
+          cat tooling/loc_report_github.txt >> $GITHUB_STEP_SUMMARY
+
+      - name: Post results to Slack
+        if: always()
+        run: |
+          if [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data @tooling/slack_message.json \
+              "${{ secrets.SLACK_WEBHOOK }}"
+          fi

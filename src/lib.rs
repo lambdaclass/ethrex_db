@@ -8,7 +8,8 @@ mod file_manager;
 mod serialization;
 
 // ETHREX COPY STRUCTURES
-mod rlp;
-pub mod trie;
+mod ethrex;
+pub use ethrex::rlp;
+pub use ethrex::trie;
 
 pub use db::EthrexDB;
