@@ -10,14 +10,20 @@
 //! - Extension -> Extend with child but no value (value_offset = 0)
 //! - Branch -> Branch (unchanged)
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use crate::trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeRef, TrieError};
+use crate::trie::{
+    BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeHash, NodeRef, TrieError,
+};
 
 /// Tag for Branch node (16 children + 1 value)
 const TAG_BRANCH: u8 = 0;
 /// Tag for Extend node (combines Extension and Leaf)
 const TAG_EXTEND: u8 = 1;
+
+/// Type alias for incremental serialization result
+type IncrementalResult = Result<(Vec<u8>, HashMap<NodeHash, u64>, u64), TrieError>;
 
 /// Serializes a Merkle Patricia Trie into a byte buffer using the two node format
 ///
@@ -27,20 +33,88 @@ const TAG_EXTEND: u8 = 1;
 pub struct Serializer {
     /// Buffer where serialized data is accumulated
     buffer: Vec<u8>,
+    /// Index of existing nodes (hash -> file offset)
+    node_index: HashMap<NodeHash, u64>,
+    /// New nodes added during this serialization (hash -> absolute offset)
+    new_nodes: HashMap<NodeHash, u64>,
+    /// Base offset where new data will be written in file
+    base_offset: u64,
 }
 
 impl Serializer {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create a new incremental serializer with existing node index
+    pub fn new_incremental(node_index: &HashMap<NodeHash, u64>, base_offset: u64) -> Self {
+        Self {
+            buffer: Vec::new(),
+            node_index: node_index.clone(),
+            new_nodes: HashMap::new(),
+            base_offset,
+        }
+    }
+
     /// Serializes a trie using the two node format
+    #[allow(dead_code)]
     pub fn serialize_tree(mut self, root: &Node) -> Result<Vec<u8>, TrieError> {
         self.serialize_node(root)?;
         Ok(self.buffer)
     }
 
+    /// Serializes a trie incrementally, only storing new nodes
+    /// Returns the serialized data, a map of new node hashes to their offsets, and the root offset
+    pub fn serialize_tree_incremental(mut self, root: &Node) -> IncrementalResult {
+        let root_offset = self.serialize_node_or_ref(root)?;
+        Ok((self.buffer, self.new_nodes, root_offset))
+    }
+
+    /// Serializes a node or returns existing offset if already stored
+    fn serialize_node_or_ref(&mut self, node: &Node) -> Result<u64, TrieError> {
+        let hash = node.compute_hash();
+
+        // Check if node already exists in the database
+        if let Some(&existing_offset) = self.node_index.get(&hash) {
+            return Ok(existing_offset);
+        }
+
+        // Check if we already serialized this node in this batch
+        if let Some(&absolute_offset) = self.new_nodes.get(&hash) {
+            return Ok(absolute_offset);
+        }
+
+        // Node is new, serialize it
+        let buffer_offset = self.buffer.len() as u64;
+        let absolute_offset = self.base_offset + buffer_offset;
+        self.new_nodes.insert(hash, absolute_offset);
+        self.serialize_node_internal(node)?;
+        Ok(absolute_offset)
+    }
+
+    /// Handles NodeRef serialization - returns offset for both Hash and Node variants
+    fn serialize_noderef(&mut self, noderef: &NodeRef) -> Result<u64, TrieError> {
+        match noderef {
+            NodeRef::Hash(hash) if hash.is_valid() => {
+                // Look up the offset for this hash - this is an existing node
+                if let Some(&offset) = self.node_index.get(hash) {
+                    Ok(offset) // Return absolute offset in file
+                } else {
+                    // This shouldn't happen if trie.commit() was called properly
+                    panic!("Hash reference not found in index: {:?}", hash);
+                }
+            }
+            NodeRef::Hash(_) => Ok(0), // Empty/invalid hash
+            NodeRef::Node(node, _) => {
+                // This is a new node, serialize it
+                self.serialize_node_or_ref(node)
+            }
+        }
+    }
+
     /// Serializes a node, converting from 3 node to 2 node system
+    #[allow(dead_code)]
     fn serialize_node(&mut self, node: &Node) -> Result<u64, TrieError> {
         let offset = self.buffer.len() as u64;
 
@@ -63,8 +137,6 @@ impl Serializer {
                 // Go back and write the actual value offset
                 self.buffer[value_offset_pos + 8..value_offset_pos + 16]
                     .copy_from_slice(&value_offset.to_le_bytes());
-
-                Ok(offset)
             }
             Node::Extension(ext) => {
                 // Extension becomes Extend with only child
@@ -93,8 +165,6 @@ impl Serializer {
                     self.buffer[child_offset_pos..child_offset_pos + 8]
                         .copy_from_slice(&child_offset.to_le_bytes());
                 }
-
-                Ok(offset)
             }
             Node::Branch(branch) => {
                 // Branch stays Branch but with offsets
@@ -137,8 +207,93 @@ impl Serializer {
                     pos += 8;
                 }
                 self.buffer[pos..pos + 8].copy_from_slice(&value_offset.to_le_bytes());
+            }
+        }
 
-                Ok(offset)
+        Ok(offset)
+    }
+
+    /// Internal node serialization (used by both serialize_node and serialize_node_or_ref)
+    fn serialize_node_internal(&mut self, node: &Node) -> Result<(), TrieError> {
+        match node {
+            Node::Leaf(leaf) => {
+                // Leaf becomes Extend with only value
+                self.buffer.push(TAG_EXTEND);
+
+                let compact_nibbles = leaf.partial.encode_compact();
+                self.write_bytes_with_len(&compact_nibbles);
+
+                // Reserve space for offsets
+                let value_offset_pos = self.buffer.len();
+                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // node offset = 0
+                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset placeholder
+
+                let value_offset = self.base_offset + self.buffer.len() as u64; // Absolute offset
+                self.write_bytes_with_len(&leaf.value);
+
+                // Go back and write the actual value offset
+                self.buffer[value_offset_pos + 8..value_offset_pos + 16]
+                    .copy_from_slice(&value_offset.to_le_bytes());
+
+                Ok(())
+            }
+            Node::Extension(ext) => {
+                // Extension becomes Extend with only child
+                self.buffer.push(TAG_EXTEND);
+
+                let compact_prefix = ext.prefix.encode_compact();
+                self.write_bytes_with_len(&compact_prefix);
+
+                // Reserve space for offsets
+                let child_offset_pos = self.buffer.len();
+                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // child offset placeholder
+                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset = 0
+
+                let child_offset = self.serialize_noderef(&ext.child)?;
+
+                // Go back and write the actual child offset
+                if child_offset > 0 {
+                    self.buffer[child_offset_pos..child_offset_pos + 8]
+                        .copy_from_slice(&child_offset.to_le_bytes());
+                }
+
+                Ok(())
+            }
+            Node::Branch(branch) => {
+                // Branch stays Branch but with offsets
+                self.buffer.push(TAG_BRANCH);
+
+                // Reserve space for all offsets
+                let offsets_start = self.buffer.len();
+                // 16 child offsets + 1 value offset
+                for _ in 0..17 {
+                    self.buffer.extend_from_slice(&0u64.to_le_bytes());
+                }
+
+                // Serialize all children and collect their offsets
+                let mut child_offsets = [0u64; 16];
+                for (i, child) in branch.choices.iter().enumerate() {
+                    child_offsets[i] = self.serialize_noderef(child)?;
+                }
+
+                // Serialize value if present
+                let value_offset = if branch.value.is_empty() {
+                    0u64
+                } else {
+                    let offset = self.base_offset + self.buffer.len() as u64; // Absolute offset
+                    self.write_bytes_with_len(&branch.value);
+                    offset
+                };
+
+                // Go back and write all the actual offsets
+                let mut pos = offsets_start;
+                for &child_offset in &child_offsets {
+                    self.buffer[pos..pos + 8].copy_from_slice(&child_offset.to_le_bytes());
+                    pos += 8;
+                }
+                self.buffer[pos..pos + 8].copy_from_slice(&value_offset.to_le_bytes());
+
+                Ok(())
             }
         }
     }
@@ -166,6 +321,7 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Deserializes a tree from the two node format back to standard 3 node format
+    #[allow(dead_code)]
     pub fn decode_tree(&self) -> Result<Node, TrieError> {
         let node = self.decode_node_at(0)?;
         node.compute_hash();
@@ -173,7 +329,7 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Decodes a node from the two node format at specific position
-    fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
+    pub fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
         if pos >= self.buffer.len() {
             panic!("Invalid buffer position");
         }
@@ -242,6 +398,7 @@ impl<'a> Deserializer<'a> {
                 let mut children: [NodeRef; 16] = Default::default();
                 for (i, &offset) in child_offsets.iter().enumerate() {
                     if offset > 0 {
+                        // All offsets are absolute in the file
                         let child = self.decode_node_at(offset as usize)?;
                         children[i] = NodeRef::Node(Arc::new(child), OnceLock::new());
                     }
@@ -249,8 +406,12 @@ impl<'a> Deserializer<'a> {
 
                 // Read value if present
                 let value = if value_offset > 0 {
-                    self.read_value_at_offset(value_offset as usize)?
-                        .unwrap_or_default()
+                    if (value_offset as usize) >= self.buffer.len() {
+                        vec![]
+                    } else {
+                        self.read_value_at_offset(value_offset as usize)?
+                            .unwrap_or_default()
+                    }
                 } else {
                     vec![]
                 };
@@ -264,6 +425,7 @@ impl<'a> Deserializer<'a> {
     }
 
     /// Gets a value by path without copying data
+    #[allow(dead_code)]
     pub fn get_by_path(&self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
         if self.buffer.is_empty() {
             return Ok(None);
@@ -271,6 +433,16 @@ impl<'a> Deserializer<'a> {
 
         let nibbles = Nibbles::from_raw(path, false);
         self.get_by_path_inner(nibbles, 0)
+    }
+
+    /// Gets a value by path starting at a specific offset
+    pub fn get_by_path_at(&self, path: &[u8], offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let nibbles = Nibbles::from_raw(path, false);
+        self.get_by_path_inner(nibbles, offset)
     }
 
     /// Internal helper for get_by_path with position tracking
@@ -404,7 +576,8 @@ impl<'a> Deserializer<'a> {
             return Ok(None);
         }
 
-        Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
+        let value = self.buffer[data_start..data_start + len].to_vec();
+        Ok(Some(value))
     }
 
     /// Read a u64 value from buffer at position
@@ -429,6 +602,7 @@ impl<'a> Deserializer<'a> {
 }
 
 /// Helper function to serialize a Merkle Patricia Trie node to bytes.
+#[allow(dead_code)]
 pub fn serialize(node: &Node) -> Vec<u8> {
     Serializer::new().serialize_tree(node).unwrap()
 }

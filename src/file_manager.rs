@@ -98,6 +98,11 @@ impl FileManager {
         Ok(offset)
     }
 
+    /// Get the current file size
+    pub fn get_file_size(&self) -> Result<u64, TrieError> {
+        Ok(self.mmap.len() as u64)
+    }
+
     /// Get slice from a specific offset to the end of the file
     pub fn get_slice_to_end(&self, offset: u64) -> Result<&[u8], TrieError> {
         if offset as usize >= self.mmap.len() {
@@ -105,16 +110,6 @@ impl FileManager {
         }
 
         Ok(&self.mmap[offset as usize..])
-    }
-
-    /// Get slice of exactly n bytes from a specific offset
-    pub fn get_slice_at(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
-        let start = offset as usize;
-        let end = start + size;
-
-        assert!(end <= self.mmap.len(), "Offset out of bounds");
-
-        Ok(&self.mmap[start..end])
     }
 }
 

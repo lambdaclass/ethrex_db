@@ -13,4 +13,6 @@ pub enum TrieError {
     LockError,
     #[error("DB Error: {0}")]
     DbError(String),
+    #[error("Other Error: {0}")]
+    Other(String),
 }
