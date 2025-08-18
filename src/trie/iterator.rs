@@ -1,7 +1,4 @@
-use crate::trie::{
-    Nibbles, Node, NodeRef,
-    PathRLP, Trie, TrieDB, ValueRLP,
-};
+use crate::trie::{Nibbles, Node, NodeRef, PathRLP, Trie, TrieDB, ValueRLP};
 
 pub struct TrieIterator {
     db: Box<dyn TrieDB>,

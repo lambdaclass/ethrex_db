@@ -10,14 +10,14 @@ pub mod test_utils;
 
 // Re-export commonly used types
 pub use self::{
+    branch::BranchNode,
     error::TrieError,
+    extension::ExtensionNode,
     iterator::TrieIterator,
+    leaf::LeafNode,
     nibbles::Nibbles,
     node::{Node, NodeRef, ValueOrHash},
     node_hash::NodeHash,
-    branch::BranchNode,
-    extension::ExtensionNode,
-    leaf::LeafNode,
 };
 
 use ethereum_types::H256;
@@ -28,9 +28,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{
-    rlp::{RLP_NULL, RLPDecode},
-};
+use crate::rlp::{RLP_NULL, RLPDecode};
 
 lazy_static! {
     // Hash value for an empty trie, equal to keccak(RLP_NULL)

@@ -1,4 +1,4 @@
-use crate::rlp::{RLPDecode, RLPEncode, RLPDecodeError, Encoder};
+use crate::rlp::{Encoder, RLPDecode, RLPDecodeError, RLPEncode};
 use ethereum_types::H256;
 #[cfg(test)]
 use libmdbx::orm::{Decodable, Encodable};

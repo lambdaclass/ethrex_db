@@ -4,12 +4,8 @@ use std::{
 };
 
 use crate::{
-    rlp::{RLPDecode, RLPDecodeError, Decoder, decode::decode_bytes, RLPEncode},
-    trie::{
-        BranchNode, ExtensionNode, LeafNode,
-        Nibbles, NodeHash, TrieError,
-        TrieDB, ValueRLP,
-    },
+    rlp::{Decoder, RLPDecode, RLPDecodeError, RLPEncode, decode::decode_bytes},
+    trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, NodeHash, TrieDB, TrieError, ValueRLP},
 };
 
 /// A reference to a node.

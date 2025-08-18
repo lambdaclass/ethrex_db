@@ -1,10 +1,8 @@
 use crate::{
     rlp::Encoder,
     trie::{
-        ExtensionNode, LeafNode,
-        Nibbles, NodeHash, TrieError,
-        Node, NodeRef, ValueOrHash,
-        TrieDB, ValueRLP,
+        ExtensionNode, LeafNode, Nibbles, Node, NodeHash, NodeRef, TrieDB, TrieError, ValueOrHash,
+        ValueRLP,
     },
 };
 

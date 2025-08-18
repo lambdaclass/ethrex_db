@@ -1,10 +1,6 @@
 use crate::{
     rlp::Encoder,
-    trie::{
-        BranchNode, ExtensionNode,
-        Nibbles, NodeHash, TrieError,
-        Node, ValueOrHash, ValueRLP,
-    },
+    trie::{BranchNode, ExtensionNode, Nibbles, Node, NodeHash, TrieError, ValueOrHash, ValueRLP},
 };
 
 /// Leaf Node of an an Ethereum Compatible Patricia Merkle Trie

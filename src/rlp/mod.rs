@@ -6,7 +6,7 @@ pub mod structs;
 
 // Re-export commonly used types and traits
 pub use self::{
-    constants::{RLP_NULL, RLP_EMPTY_LIST},
+    constants::{RLP_EMPTY_LIST, RLP_NULL},
     decode::RLPDecode,
     encode::RLPEncode,
     error::RLPDecodeError,

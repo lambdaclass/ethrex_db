@@ -1,5 +1,5 @@
 use super::{
-    RLPDecode, RLPEncode, RLPDecodeError,
+    RLPDecode, RLPDecodeError, RLPEncode,
     decode::{decode_rlp_item, get_item_with_prefix},
     encode::encode_length,
 };

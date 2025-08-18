@@ -1,6 +1,6 @@
 use std::cmp;
 
-use crate::rlp::{RLPDecode, RLPEncode, RLPDecodeError, Decoder, Encoder};
+use crate::rlp::{Decoder, Encoder, RLPDecode, RLPDecodeError, RLPEncode};
 
 /// Struct representing a list of nibbles (half-bytes)
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]

@@ -2,7 +2,7 @@
 
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, serialize};
-use crate::trie::{TrieError, Node, NodeHash};
+use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
 
 /// Ethrex DB struct
