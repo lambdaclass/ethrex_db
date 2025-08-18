@@ -8,6 +8,26 @@ Most blockchains separate the world state from the proof structure, typically us
 
 ### Installation
 
+### Benchmarking and Profiling
+
+To run a benchmark comparing this new implementation against libmdbx (as we do in Ethrex), run:
+
+```bash
+make bench
+```
+
+To profile using Samply, first install it:
+
+```bash
+cargo install --locked samply
+```
+
+Then, run the profile:
+
+```bash
+make profile
+```
+
 ## EthrexDB MVP
 
 > [!NOTE]
