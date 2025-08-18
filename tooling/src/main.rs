@@ -62,6 +62,14 @@ fn main() {
 
         spinner.success("Detailed report generated!");
         println!("{}", shell_summary(new_report));
+        println!("\nDetailed breakdown:");
+        
+        let mut files: Vec<_> = detailed_files.iter().collect();
+        files.sort_by_key(|(name, _)| *name);
+        
+        for (file_name, loc) in files {
+            println!("  {}: {} lines", file_name, loc);
+        }
     } else if opts.compare_detailed {
         let current_detailed_loc_report = detailed_files;
 
