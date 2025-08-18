@@ -128,31 +128,23 @@ impl EthrexDB {
     /// Read the previous offset at a specific version
     fn read_previous_offset_at_version(&self, version_offset: u64) -> Result<u64, TrieError> {
         let prev_offset_slice = self.file_manager.get_slice_at(version_offset, 8)?;
-        Ok(u64::from_le_bytes([
-            prev_offset_slice[0],
-            prev_offset_slice[1],
-            prev_offset_slice[2],
-            prev_offset_slice[3],
-            prev_offset_slice[4],
-            prev_offset_slice[5],
-            prev_offset_slice[6],
-            prev_offset_slice[7],
-        ]))
+        Ok(u64::from_le_bytes(prev_offset_slice.try_into().unwrap()))
     }
 
     /// Find the offset of the next version after the given offset
     fn find_next_version_offset(&self, current_offset: u64) -> Result<Option<u64>, TrieError> {
-        let mut offsets = Vec::new();
         let mut offset = self.file_manager.read_latest_root_offset()?;
-
-        // Collect all version offsets by following the linked list
+        let mut next_offset = None;
+        
+        // Walk the linked list to find the smallest offset greater than current_offset
         while offset != 0 {
-            offsets.push(offset);
+            if offset > current_offset && (next_offset.is_none() || offset < next_offset.unwrap()) {
+                next_offset = Some(offset);
+            }
             offset = self.read_previous_offset_at_version(offset)?;
         }
-
-        // Find the next offset greater than the current offset
-        Ok(offsets.into_iter().find(|&o| o > current_offset))
+        
+        Ok(next_offset)
     }
 }
 

@@ -184,15 +184,7 @@ impl<'a> Deserializer<'a> {
         match tag {
             TAG_EXTEND => {
                 // Read nibbles length
-                if position + 4 > self.buffer.len() {
-                    panic!("Invalid buffer length");
-                }
-                let len = u32::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                ]) as usize;
+                let len = self.read_u32_at(position)? as usize;
                 position += 4;
 
                 // Read nibbles
@@ -204,35 +196,11 @@ impl<'a> Deserializer<'a> {
                 position += len;
 
                 // Read node offset
-                if position + 8 > self.buffer.len() {
-                    panic!("Invalid buffer length");
-                }
-                let node_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
+                let node_offset = self.read_u64_at(position)?;
                 position += 8;
 
                 // Read value offset
-                if position + 8 > self.buffer.len() {
-                    panic!("Invalid buffer length");
-                }
-                let value_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
+                let value_offset = self.read_u64_at(position)?;
 
                 // Determine node type based on what's present
                 match (node_offset > 0, value_offset > 0) {
@@ -263,36 +231,12 @@ impl<'a> Deserializer<'a> {
                 // Read 16 child offsets
                 let mut child_offsets = [0u64; 16];
                 for child in child_offsets.iter_mut() {
-                    if position + 8 > self.buffer.len() {
-                        panic!("Invalid buffer length");
-                    }
-                    *child = u64::from_le_bytes([
-                        self.buffer[position],
-                        self.buffer[position + 1],
-                        self.buffer[position + 2],
-                        self.buffer[position + 3],
-                        self.buffer[position + 4],
-                        self.buffer[position + 5],
-                        self.buffer[position + 6],
-                        self.buffer[position + 7],
-                    ]);
+                    *child = self.read_u64_at(position)?;
                     position += 8;
                 }
 
                 // Read value offset
-                if position + 8 > self.buffer.len() {
-                    panic!("Invalid buffer length");
-                }
-                let value_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
+                let value_offset = self.read_u64_at(position)?;
 
                 // Build children NodeRefs
                 let mut children: [NodeRef; 16] = Default::default();
@@ -348,12 +292,9 @@ impl<'a> Deserializer<'a> {
                 if position + 4 > self.buffer.len() {
                     return Ok(None);
                 }
-                let len = u32::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                ]) as usize;
+                let len =
+                    u32::from_le_bytes(self.buffer[position..position + 4].try_into().unwrap())
+                        as usize;
                 position += 4;
 
                 // Read nibbles data
@@ -368,32 +309,16 @@ impl<'a> Deserializer<'a> {
                 if position + 8 > self.buffer.len() {
                     return Ok(None);
                 }
-                let node_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
+                let node_offset =
+                    u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
                 position += 8;
 
                 // Read value offset
                 if position + 8 > self.buffer.len() {
                     return Ok(None);
                 }
-                let value_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
+                let value_offset =
+                    u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
 
                 // Extend has only a child or a value
                 if node_offset == 0 && value_offset > 0 {
@@ -428,16 +353,8 @@ impl<'a> Deserializer<'a> {
                     if position + 8 > self.buffer.len() {
                         return Ok(None);
                     }
-                    let value_offset = u64::from_le_bytes([
-                        self.buffer[position],
-                        self.buffer[position + 1],
-                        self.buffer[position + 2],
-                        self.buffer[position + 3],
-                        self.buffer[position + 4],
-                        self.buffer[position + 5],
-                        self.buffer[position + 6],
-                        self.buffer[position + 7],
-                    ]);
+                    let value_offset =
+                        u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
 
                     if value_offset > 0 {
                         self.read_value_at_offset(value_offset as usize)
@@ -457,16 +374,11 @@ impl<'a> Deserializer<'a> {
                         return Ok(None);
                     }
 
-                    let child_offset = u64::from_le_bytes([
-                        self.buffer[child_offset_pos],
-                        self.buffer[child_offset_pos + 1],
-                        self.buffer[child_offset_pos + 2],
-                        self.buffer[child_offset_pos + 3],
-                        self.buffer[child_offset_pos + 4],
-                        self.buffer[child_offset_pos + 5],
-                        self.buffer[child_offset_pos + 6],
-                        self.buffer[child_offset_pos + 7],
-                    ]);
+                    let child_offset = u64::from_le_bytes(
+                        self.buffer[child_offset_pos..child_offset_pos + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
 
                     if child_offset > 0 {
                         self.get_by_path_inner(path, child_offset as usize)
@@ -485,12 +397,7 @@ impl<'a> Deserializer<'a> {
             return Ok(None);
         }
 
-        let len = u32::from_le_bytes([
-            self.buffer[offset],
-            self.buffer[offset + 1],
-            self.buffer[offset + 2],
-            self.buffer[offset + 3],
-        ]) as usize;
+        let len = u32::from_le_bytes(self.buffer[offset..offset + 4].try_into().unwrap()) as usize;
 
         let data_start = offset + 4;
         if data_start + len > self.buffer.len() {
@@ -498,6 +405,26 @@ impl<'a> Deserializer<'a> {
         }
 
         Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
+    }
+
+    /// Read a u64 value from buffer at position
+    fn read_u64_at(&self, pos: usize) -> Result<u64, TrieError> {
+        if pos + 8 > self.buffer.len() {
+            panic!("Invalid buffer length for u64");
+        }
+        Ok(u64::from_le_bytes(
+            self.buffer[pos..pos + 8].try_into().unwrap(),
+        ))
+    }
+
+    /// Read a u32 value from buffer at position  
+    fn read_u32_at(&self, pos: usize) -> Result<u32, TrieError> {
+        if pos + 4 > self.buffer.len() {
+            panic!("Invalid buffer length for u32");
+        }
+        Ok(u32::from_le_bytes(
+            self.buffer[pos..pos + 4].try_into().unwrap(),
+        ))
     }
 }
 
