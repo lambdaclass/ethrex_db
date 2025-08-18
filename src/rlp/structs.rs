@@ -4,7 +4,6 @@ use super::{
     encode::encode_length,
 };
 use bytes::BufMut;
-use bytes::Bytes;
 
 #[derive(Debug)]
 pub struct Decoder<'a> {
@@ -107,9 +106,9 @@ impl<'a> Encoder<'a> {
 
     /// Stores a (key, value) list where the values are already encoded (i.e. value = RLP prefix || payload)
     /// but the keys are not encoded
-    pub fn encode_key_value_list<T: RLPEncode>(mut self, list: &Vec<(Bytes, Bytes)>) -> Self {
+    pub fn encode_key_value_list(mut self, list: &Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         for (key, value) in list {
-            <Bytes>::encode(key, &mut self.temp_buf);
+            key.as_slice().encode(&mut self.temp_buf);
             // value is already encoded
             self.temp_buf.put_slice(value);
         }

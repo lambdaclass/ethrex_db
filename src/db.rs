@@ -135,7 +135,7 @@ impl EthrexDB {
     fn find_next_version_offset(&self, current_offset: u64) -> Result<Option<u64>, TrieError> {
         let mut offset = self.file_manager.read_latest_root_offset()?;
         let mut next_offset = None;
-        
+
         // Walk the linked list to find the smallest offset greater than current_offset
         while offset != 0 {
             if offset > current_offset && (next_offset.is_none() || offset < next_offset.unwrap()) {
@@ -143,7 +143,7 @@ impl EthrexDB {
             }
             offset = self.read_previous_offset_at_version(offset)?;
         }
-        
+
         Ok(next_offset)
     }
 }
