@@ -3,8 +3,10 @@ use std::fs;
 use std::path::Path;
 
 use clap::Parser;
-use report::{LinesOfCodeReport, LinesOfCodeReporterOptions, shell_summary, github_step_summary, pr_message, slack_message};
-use serde_json;
+use report::{
+    LinesOfCodeReport, LinesOfCodeReporterOptions, github_step_summary, pr_message, shell_summary,
+    slack_message,
+};
 use spinoff::{Color, Spinner, spinners::Dots};
 use tokei::{Config, LanguageType, Languages};
 
@@ -23,7 +25,7 @@ fn count_lines_of_code() -> (usize, HashMap<String, usize>) {
         for report in &rust.reports {
             let file_path = report.name.to_string_lossy().to_string();
             if let Some(relative_path) = file_path.strip_prefix("../src/") {
-                // Exclude files in ethrex/ subdirectory 
+                // Exclude files in ethrex/ subdirectory
                 if !relative_path.starts_with("ethrex/") {
                     total_loc += report.stats.code;
                     detailed_files.insert(relative_path.to_string(), report.stats.code);
@@ -41,7 +43,7 @@ fn main() {
     let mut spinner = Spinner::new(Dots, "Counting lines of code...", Color::Cyan);
 
     let (total_loc, detailed_files) = count_lines_of_code();
-    
+
     spinner.success("Lines of code calculated!");
 
     let mut spinner = Spinner::new(Dots, "Generating report...", Color::Cyan);
@@ -57,7 +59,7 @@ fn main() {
             serde_json::to_string(&detailed_files).unwrap(),
         )
         .expect("current_detailed_loc_report.json could not be written");
-        
+
         spinner.success("Detailed report generated!");
         println!("{}", shell_summary(new_report));
     } else if opts.compare_detailed {
@@ -73,7 +75,7 @@ fn main() {
             pr_message(previous_detailed_loc_report, current_detailed_loc_report),
         )
         .unwrap();
-        
+
         spinner.success("Comparison report generated!");
     } else if opts.summary {
         spinner.success("Report generated!");
