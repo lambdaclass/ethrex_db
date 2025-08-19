@@ -12,8 +12,6 @@ pub struct EthrexDB {
     file_manager: FileManager,
     /// Index mapping node hashes to their file offsets
     node_index: HashMap<NodeHash, u64>,
-    /// List of root offsets in chronological order (for linked list)
-    root_history: Vec<u64>,
 }
 
 impl EthrexDB {
@@ -23,18 +21,16 @@ impl EthrexDB {
         Ok(Self {
             file_manager,
             node_index: HashMap::new(),
-            root_history: Vec::new(),
         })
     }
 
     /// Open an existing database
     pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
         let file_manager = FileManager::open(file_path)?;
-        // TODO: Load node_index and root_history from file
+        // TODO: Load node_index from file
         Ok(Self {
             file_manager,
             node_index: HashMap::new(),
-            root_history: Vec::new(),
         })
     }
 
@@ -58,9 +54,6 @@ impl EthrexDB {
 
         // Update header to point to the root node
         self.file_manager.update_latest_root_offset(root_offset)?;
-
-        self.root_history.push(root_offset);
-
         Ok(root_hash)
     }
 
@@ -84,24 +77,11 @@ impl EthrexDB {
         if latest_offset == 0 {
             return Ok(None);
         }
-        self.get_at_root(key, latest_offset)
-    }
-
-    /// Get the list of all root versions in chronological order (oldest first)
-    pub fn get_root_history(&self) -> Result<Vec<u64>, TrieError> {
-        Ok(self.root_history.clone())
-    }
-
-    /// Get a value from a specific root
-    pub fn get_at_root(&self, key: &[u8], root_offset: u64) -> Result<Option<Vec<u8>>, TrieError> {
-        if root_offset == 0 {
-            return Ok(None);
-        }
 
         let file_data = self.file_manager.get_slice_to_end(0)?;
 
         // All roots have 8-byte prepended previous root offset
-        let actual_root_offset = root_offset + 8;
+        let actual_root_offset = latest_offset + 8;
 
         Deserializer::new(file_data).get_by_path_at(key, actual_root_offset as usize)
     }
@@ -561,78 +541,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn test_root_history_linked_list() {
-        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let mut db = EthrexDB::new(db_path).unwrap();
-
-        // Initially no roots
-        assert_eq!(db.get_root_history().unwrap(), vec![]);
-
-        // Commit 3 different states
-        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-
-        // State 1
-        trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        let root1 = trie.root_node().unwrap().unwrap();
-        db.commit(&root1).unwrap();
-
-        // State 2
-        trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        let root2 = trie.root_node().unwrap().unwrap();
-        db.commit(&root2).unwrap();
-
-        // State 3
-        trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
-        let root3 = trie.root_node().unwrap().unwrap();
-        db.commit(&root3).unwrap();
-
-        // Get root history (should be in chronological order)
-        let history = db.get_root_history().unwrap();
-        assert_eq!(history.len(), 3);
-
-        // Verify we can read from each historical root
-        let (root1_offset, root2_offset, root3_offset) = (history[0], history[1], history[2]);
-
-        // At root1: only key1 exists
-        assert_eq!(
-            db.get_at_root(b"key1", root1_offset).unwrap(),
-            Some(b"value1".to_vec())
-        );
-        assert_eq!(db.get_at_root(b"key2", root1_offset).unwrap(), None);
-        assert_eq!(db.get_at_root(b"key3", root1_offset).unwrap(), None);
-
-        // At root2: key1 and key2 exist
-        assert_eq!(
-            db.get_at_root(b"key1", root2_offset).unwrap(),
-            Some(b"value1".to_vec())
-        );
-        assert_eq!(
-            db.get_at_root(b"key2", root2_offset).unwrap(),
-            Some(b"value2".to_vec())
-        );
-        assert_eq!(db.get_at_root(b"key3", root2_offset).unwrap(), None);
-
-        // At root3: all keys exist
-        assert_eq!(
-            db.get_at_root(b"key1", root3_offset).unwrap(),
-            Some(b"value1".to_vec())
-        );
-        assert_eq!(
-            db.get_at_root(b"key2", root3_offset).unwrap(),
-            Some(b"value2".to_vec())
-        );
-        assert_eq!(
-            db.get_at_root(b"key3", root3_offset).unwrap(),
-            Some(b"value3".to_vec())
-        );
-
-        // Current get() should return the latest state
-        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
-        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
     }
 }
