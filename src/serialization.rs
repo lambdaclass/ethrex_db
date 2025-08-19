@@ -413,9 +413,12 @@ impl<'a> Deserializer<'a> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::trie::{InMemoryTrieDB, Trie, node_hash::NodeHash};
+
+    /// Offset to skip the prepended previous root offset (8 bytes)
+    const ROOT_DATA_OFFSET: usize = 8;
 
     fn new_temp() -> Trie {
         use std::collections::HashMap;
@@ -429,16 +432,333 @@ mod test {
     }
 
     #[test]
-    fn test_simple_serialization() {
+    fn test_serialize_leaf() {
+        let leaf = Node::Leaf(LeafNode {
+            partial: Nibbles::from_hex(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5]),
+            value: b"long_path_value".to_vec(),
+        });
+
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&leaf, 0).unwrap();
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(leaf, recovered);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_branch_empty() {
+        let branch = Node::Branch(Box::new(BranchNode {
+            choices: Default::default(),
+            value: vec![],
+        }));
+
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&branch, 0).unwrap();
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(branch, recovered);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_tree_extension_to_leaf() {
+        let leaf = Node::Leaf(LeafNode {
+            partial: Nibbles::from_hex(vec![5, 6, 7]),
+            value: b"nested_leaf".to_vec(),
+        });
+
+        let ext = Node::Extension(ExtensionNode {
+            prefix: Nibbles::from_hex(vec![1, 2]),
+            child: NodeRef::Node(Arc::new(leaf), OnceLock::new()),
+        });
+
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&ext, 0).unwrap();
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(recovered, ext);
+        match recovered {
+            Node::Extension(ext_node) => {
+                assert_eq!(ext_node.prefix, Nibbles::from_hex(vec![1, 2]));
+                match &ext_node.child {
+                    NodeRef::Node(arc_node, _) => match &**arc_node {
+                        Node::Leaf(leaf_node) => {
+                            assert_eq!(leaf_node.partial, Nibbles::from_hex(vec![5, 6, 7]));
+                            assert_eq!(leaf_node.value, b"nested_leaf");
+                        }
+                        _ => panic!("Expected leaf node"),
+                    },
+                    _ => panic!("Expected embedded node"),
+                }
+            }
+            _ => panic!("Expected extension node"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_deserialize_deep_tree() {
+        let leaf = Node::Leaf(LeafNode {
+            partial: Nibbles::from_hex(vec![9, 8]),
+            value: b"deep_leaf".to_vec(),
+        });
+
+        let inner_ext = Node::Extension(ExtensionNode {
+            prefix: Nibbles::from_hex(vec![5, 6]),
+            child: NodeRef::Node(Arc::new(leaf), OnceLock::new()),
+        });
+
+        let mut branch_choices: [NodeRef; 16] = Default::default();
+        branch_choices[2] = NodeRef::Node(Arc::new(inner_ext), OnceLock::new());
+
+        let branch = Node::Branch(Box::new(BranchNode {
+            choices: branch_choices,
+            value: vec![],
+        }));
+
+        let outer_ext = Node::Extension(ExtensionNode {
+            prefix: Nibbles::from_hex(vec![1, 2, 3]),
+            child: NodeRef::Node(Arc::new(branch), OnceLock::new()),
+        });
+
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&outer_ext, 0).unwrap();
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(recovered, outer_ext);
+    }
+
+    #[test]
+    fn test_trie_serialization_empty() {
+        let trie = new_temp();
+        let root = trie.root_node().unwrap();
+        assert!(root.is_none());
+    }
+
+    #[test]
+    fn test_trie_serialization_single_insert() {
         let mut trie = new_temp();
         trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
         let serializer = Serializer::new(&HashMap::new(), 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(root, recovered);
+    }
+
+    #[test]
+    fn test_trie_serialization_multiple_inserts() {
+        let mut trie = new_temp();
+
+        let test_data = vec![
+            (b"do".to_vec(), b"verb".to_vec()),
+            (b"dog".to_vec(), b"puppy".to_vec()),
+            (b"doge".to_vec(), b"coin".to_vec()),
+            (b"horse".to_vec(), b"stallion".to_vec()),
+        ];
+
+        for (key, value) in &test_data {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        let root = trie.root_node().unwrap().unwrap();
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(recovered, root);
+    }
+
+    #[test]
+    fn test_file_io() {
+        use std::fs;
+
+        // Create trie
+        let mut trie = new_temp();
+        trie.insert(b"file_key".to_vec(), b"file_value".to_vec())
+            .unwrap();
+
+        // Serialize to file
+        let root = trie.root_node().unwrap().unwrap();
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+
+        let path = "/tmp/test_trie.mpt";
+        fs::write(path, &buffer).unwrap();
+
+        // Read from file and deserialize
+        let read_data = fs::read(path).unwrap();
+        let deserializer = Deserializer::new(&read_data);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(root, recovered);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_get_by_path_serialized_simple() {
+        let mut trie = new_temp();
+        trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
+
+        let root = trie.root_node().unwrap().unwrap();
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
-        let recovered = deserializer.decode_node_at(8).unwrap(); // Skip 8-byte prev root offset
+        assert_eq!(
+            deserializer.get_by_path_at(b"test", ROOT_DATA_OFFSET).unwrap(),
+            Some(b"value".to_vec())
+        );
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+        assert_eq!(root, recovered);
+    }
+
+    #[test]
+    fn test_get_by_path_serialized() {
+        let mut trie = new_temp();
+
+        let test_data = vec![
+            (b"do".to_vec(), b"verb".to_vec()),
+            (b"dog".to_vec(), b"puppy".to_vec()),
+            (b"doge".to_vec(), b"coin".to_vec()),
+            (b"horse".to_vec(), b"stallion".to_vec()),
+        ];
+
+        for (key, value) in &test_data {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        let root = trie.root_node().unwrap().unwrap();
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(
+            deserializer.get_by_path_at(b"horse", ROOT_DATA_OFFSET).unwrap(),
+            Some(b"stallion".to_vec())
+        );
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(
+            deserializer.get_by_path_at(b"dog", ROOT_DATA_OFFSET).unwrap(),
+            Some(b"puppy".to_vec())
+        );
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(
+            deserializer.get_by_path_at(b"doge", ROOT_DATA_OFFSET).unwrap(),
+            Some(b"coin".to_vec())
+        );
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(
+            deserializer.get_by_path_at(b"do", ROOT_DATA_OFFSET).unwrap(),
+            Some(b"verb".to_vec())
+        );
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(deserializer.get_by_path_at(b"cat", ROOT_DATA_OFFSET).unwrap(), None);
+
+        let deserializer = Deserializer::new(&buffer);
+        assert_eq!(deserializer.get_by_path_at(b"", ROOT_DATA_OFFSET).unwrap(), None);
+
+        // Reset position before decoding tree
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+        assert_eq!(root, recovered);
+    }
+
+    #[test]
+    fn test_complex_trie_serialization() {
+        let mut trie = new_temp();
+
+        let test_data = vec![
+            (b"app".to_vec(), b"application".to_vec()),
+            (b"apple".to_vec(), b"fruit".to_vec()),
+            (b"application".to_vec(), b"software".to_vec()),
+            (b"append".to_vec(), b"add_to_end".to_vec()),
+            (b"applied".to_vec(), b"past_tense".to_vec()),
+            (b"car".to_vec(), b"vehicle".to_vec()),
+            (b"card".to_vec(), b"playing_card".to_vec()),
+            (b"care".to_vec(), b"attention".to_vec()),
+            (b"career".to_vec(), b"profession".to_vec()),
+            (b"careful".to_vec(), b"cautious".to_vec()),
+            (b"test".to_vec(), b"examination".to_vec()),
+            (b"testing".to_vec(), b"verification".to_vec()),
+            (b"tester".to_vec(), b"one_who_tests".to_vec()),
+            (b"testament".to_vec(), b"will_document".to_vec()),
+            (b"a".to_vec(), b"letter_a".to_vec()),
+            (b"b".to_vec(), b"letter_b".to_vec()),
+            (b"c".to_vec(), b"letter_c".to_vec()),
+            (b"d".to_vec(), b"letter_d".to_vec()),
+            (b"e".to_vec(), b"letter_e".to_vec()),
+            (b"0x123456".to_vec(), b"hex_value_1".to_vec()),
+            (b"0x123abc".to_vec(), b"hex_value_2".to_vec()),
+            (b"0x124000".to_vec(), b"hex_value_3".to_vec()),
+            (b"0xabcdef".to_vec(), b"hex_value_4".to_vec()),
+            (
+                b"very_long_key_that_creates_deep_structure_in_trie_1234567890".to_vec(),
+                b"long_value_1".to_vec(),
+            ),
+            (
+                b"very_long_key_that_creates_deep_structure_in_trie_abcdefghijk".to_vec(),
+                b"long_value_2".to_vec(),
+            ),
+            (b"empty_value_key".to_vec(), vec![]),
+            (b"similar_key_1".to_vec(), b"value_1".to_vec()),
+            (b"similar_key_2".to_vec(), b"value_2".to_vec()),
+            (b"similar_key_3".to_vec(), b"value_3".to_vec()),
+            (b"123".to_vec(), b"number_123".to_vec()),
+            (b"1234".to_vec(), b"number_1234".to_vec()),
+            (b"12345".to_vec(), b"number_12345".to_vec()),
+        ];
+
+        for (key, value) in &test_data {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        let root = trie.root_node().unwrap().unwrap();
+
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+
+        for (key, expected_value) in &test_data {
+            let deserializer = Deserializer::new(&buffer);
+            let retrieved_value = deserializer.get_by_path_at(key, ROOT_DATA_OFFSET).unwrap();
+            assert_eq!(retrieved_value, Some(expected_value.clone()));
+        }
+
+        let non_existent_keys = vec![
+            b"nonexistent".to_vec(),
+            b"app_wrong".to_vec(),
+            b"car_wrong".to_vec(),
+            b"test_wrong".to_vec(),
+            b"0x999999".to_vec(),
+            b"similar_key_4".to_vec(),
+            b"".to_vec(),
+            b"very_long_nonexistent_key".to_vec(),
+        ];
+
+        for key in &non_existent_keys {
+            let deserializer = Deserializer::new(&buffer);
+            let result = deserializer.get_by_path_at(key, ROOT_DATA_OFFSET).unwrap();
+            assert_eq!(result, None);
+        }
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(root, recovered);
     }
