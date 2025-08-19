@@ -212,10 +212,11 @@ fn insert_benchmark(c: &mut Criterion) {
                 || {
                     let temp_dir = TempDir::new("ethrex_bench").unwrap();
                     let file_path = temp_dir.path().join("test.edb");
-                    EthrexDB::new(file_path).unwrap()
+                    let db = EthrexDB::new(file_path).unwrap();
+                    let trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+                    (db, trie)
                 },
-                |mut db| {
-                    let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+                |(mut db, mut trie)| {
                     for (key, value) in data {
                         trie.insert(key.clone(), value.clone()).unwrap();
                     }
@@ -319,5 +320,80 @@ fn random_get_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, insert_benchmark, random_get_benchmark);
+fn cow_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cow_updates");
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(10);
+
+    for size in [1_000, 10_000, 50_000] {
+        let base_data = generate_test_data(size);
+        let update_data = generate_test_data(size / 2); // 50% new data to add
+
+        // LibmdbxHashDB CoW test
+        group.bench_with_input(
+            BenchmarkId::new("libmdbx_hash_cow", size),
+            &(&base_data, &update_data),
+            |b, (base, updates)| {
+                b.iter_with_setup(
+                    || {
+                        let temp_dir = TempDir::new("libmdbx_cow_bench").unwrap();
+                        let mut db = LibmdbxHashDB::new(temp_dir.path());
+                        // Pre-populate with base data
+                        db.insert_batch(base);
+                        db
+                    },
+                    |mut db| {
+                        // Now add the update data (this should reuse existing trie structure)
+                        db.insert_batch(black_box(updates));
+                        black_box(db)
+                    },
+                );
+            },
+        );
+
+        // EthrexDB CoW test
+        group.bench_with_input(
+            BenchmarkId::new("ethrex_db_cow", size),
+            &(&base_data, &update_data),
+            |b, (base, updates)| {
+                b.iter_with_setup(
+                    || {
+                        let temp_dir = TempDir::new("ethrex_cow_bench").unwrap();
+                        let file_path = temp_dir.path().join("cow_test.edb");
+                        let mut db = EthrexDB::new(file_path).unwrap();
+                        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+
+                        // Pre-populate with base data
+                        for (key, value) in base.iter() {
+                            trie.insert(key.clone(), value.clone()).unwrap();
+                        }
+                        let root_node = trie.root_node().unwrap().unwrap();
+                        db.commit(&root_node).unwrap();
+                        trie.commit().unwrap(); // Convert to CoW references
+
+                        (db, trie)
+                    },
+                    |(mut db, mut trie)| {
+                        // Now add the update data with CoW
+                        for (key, value) in updates.iter() {
+                            trie.insert(key.clone(), value.clone()).unwrap();
+                        }
+                        let root_node = trie.root_node().unwrap().unwrap();
+                        db.commit(&root_node).unwrap();
+                        db
+                    },
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    insert_benchmark,
+    random_get_benchmark,
+    cow_benchmark
+);
 criterion_main!(benches);
