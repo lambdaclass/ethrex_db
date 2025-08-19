@@ -1,4 +1,4 @@
-//! EthrexDB - A simple MPT database
+//! EthrexDB - Copy-on-Write Merkle Patricia Trie Database
 
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, Serializer};
@@ -12,6 +12,8 @@ pub struct EthrexDB {
     file_manager: FileManager,
     /// Index mapping node hashes to their file offsets
     node_index: HashMap<NodeHash, u64>,
+    /// List of root offsets in chronological order (for linked list)
+    root_history: Vec<u64>,
 }
 
 impl EthrexDB {
@@ -21,38 +23,32 @@ impl EthrexDB {
         Ok(Self {
             file_manager,
             node_index: HashMap::new(),
+            root_history: Vec::new(),
         })
     }
 
     /// Open an existing database
     pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
         let file_manager = FileManager::open(file_path)?;
-        // TODO: Load node_index from file
+        // TODO: Load node_index and root_history from file
         Ok(Self {
             file_manager,
             node_index: HashMap::new(),
+            root_history: Vec::new(),
         })
     }
 
-    /// Commit a new trie to the database
-    ///
-    /// Uses Copy-on-Write to only store new/modified nodes:
-    /// 1. Serializes only new nodes (NodeRef::Node)
-    /// 2. Reuses existing nodes (NodeRef::Hash) by their offset
-    /// 3. Updates the node index with new mappings
-    /// 4. Updates the header to point to the new root
+    /// Commit a trie state to the database
     pub fn commit(&mut self, root_node: &Node) -> Result<NodeHash, TrieError> {
         let root_hash = root_node.compute_hash();
 
-        // Get the current file size (where new data will be written)
+        let prev_root_offset = self.file_manager.read_latest_root_offset()?;
         let base_offset = self.file_manager.get_file_size()?;
 
-        // Serialize the trie incrementally with the base offset
-        let serializer = Serializer::new_incremental(&self.node_index, base_offset);
+        let serializer = Serializer::new(&self.node_index, base_offset);
         let (serialized_data, new_offsets, root_offset) =
-            serializer.serialize_tree_incremental(root_node)?;
+            serializer.serialize_tree(root_node, prev_root_offset)?;
 
-        // Write new nodes at the end of file
         self.file_manager.write_at_end(&serialized_data)?;
 
         // Update node index with new node offsets (they are already absolute)
@@ -63,32 +59,51 @@ impl EthrexDB {
         // Update header to point to the root node
         self.file_manager.update_latest_root_offset(root_offset)?;
 
+        self.root_history.push(root_offset);
+
         Ok(root_hash)
     }
 
     /// Get the latest root node of the database
     pub fn root(&self) -> Result<Node, TrieError> {
-        let (latest_offset, file_data) = self.get_latest_data()?;
+        let latest_offset = self.file_manager.read_latest_root_offset()?;
         if latest_offset == 0 {
             return Err(TrieError::Other("No root node in database".to_string()));
         }
-        Deserializer::new(file_data).decode_node_at(latest_offset as usize)
+
+        let file_data = self.file_manager.get_slice_to_end(0)?;
+        // All roots now have 8-byte prepended previous root offset
+        let actual_root_offset = latest_offset + 8;
+
+        Deserializer::new(file_data).decode_node_at(actual_root_offset as usize)
     }
 
     /// Get the value of the node with the given key
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
-        let (latest_offset, file_data) = self.get_latest_data()?;
+        let latest_offset = self.file_manager.read_latest_root_offset()?;
         if latest_offset == 0 {
             return Ok(None);
         }
-        Deserializer::new(file_data).get_by_path_at(key, latest_offset as usize)
+        self.get_at_root(key, latest_offset)
     }
 
-    /// Helper to get latest offset and file data
-    fn get_latest_data(&self) -> Result<(u64, &[u8]), TrieError> {
-        let latest_offset = self.file_manager.read_latest_root_offset()?;
+    /// Get the list of all root versions in chronological order (oldest first)
+    pub fn get_root_history(&self) -> Result<Vec<u64>, TrieError> {
+        Ok(self.root_history.clone())
+    }
+
+    /// Get a value from a specific root
+    pub fn get_at_root(&self, key: &[u8], root_offset: u64) -> Result<Option<Vec<u8>>, TrieError> {
+        if root_offset == 0 {
+            return Ok(None);
+        }
+
         let file_data = self.file_manager.get_slice_to_end(0)?;
-        Ok((latest_offset, file_data))
+
+        // All roots have 8-byte prepended previous root offset
+        let actual_root_offset = root_offset + 8;
+
+        Deserializer::new(file_data).get_by_path_at(key, actual_root_offset as usize)
     }
 }
 
@@ -546,5 +561,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_root_history_linked_list() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let mut db = EthrexDB::new(db_path).unwrap();
+
+        // Initially no roots
+        assert_eq!(db.get_root_history().unwrap(), vec![]);
+
+        // Commit 3 different states
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+
+        // State 1
+        trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        let root1 = trie.root_node().unwrap().unwrap();
+        db.commit(&root1).unwrap();
+
+        // State 2
+        trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        let root2 = trie.root_node().unwrap().unwrap();
+        db.commit(&root2).unwrap();
+
+        // State 3
+        trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
+        let root3 = trie.root_node().unwrap().unwrap();
+        db.commit(&root3).unwrap();
+
+        // Get root history (should be in chronological order)
+        let history = db.get_root_history().unwrap();
+        assert_eq!(history.len(), 3);
+
+        // Verify we can read from each historical root
+        let (root1_offset, root2_offset, root3_offset) = (history[0], history[1], history[2]);
+
+        // At root1: only key1 exists
+        assert_eq!(
+            db.get_at_root(b"key1", root1_offset).unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(db.get_at_root(b"key2", root1_offset).unwrap(), None);
+        assert_eq!(db.get_at_root(b"key3", root1_offset).unwrap(), None);
+
+        // At root2: key1 and key2 exist
+        assert_eq!(
+            db.get_at_root(b"key1", root2_offset).unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(
+            db.get_at_root(b"key2", root2_offset).unwrap(),
+            Some(b"value2".to_vec())
+        );
+        assert_eq!(db.get_at_root(b"key3", root2_offset).unwrap(), None);
+
+        // At root3: all keys exist
+        assert_eq!(
+            db.get_at_root(b"key1", root3_offset).unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(
+            db.get_at_root(b"key2", root3_offset).unwrap(),
+            Some(b"value2".to_vec())
+        );
+        assert_eq!(
+            db.get_at_root(b"key3", root3_offset).unwrap(),
+            Some(b"value3".to_vec())
+        );
+
+        // Current get() should return the latest state
+        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
     }
 }

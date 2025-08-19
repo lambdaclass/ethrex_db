@@ -1,14 +1,28 @@
-//! Serialization and deserialization of the trie
+//! Incremental serialization with Copy-on-Write optimization
 //!
-//! Two-node serialization format:
-//! Instead of the standard 3 node types (Branch, Extension, Leaf), we use 2:
-//! - Branch: Has 16 children slots + 1 value slot
-//! - Extend: Has 1 child slot + 1 value slot (can represent both Extension and Leaf)
+//! ## Core Features:
+//! - **Copy-on-Write (CoW)**: Only new/modified nodes are serialized
+//! - **Linked List Versioning**: Each root has prepended offset to previous root
+//! - **Append-Only Storage**: Data is only added, never overwritten
+//! - **Node Reuse**: Existing nodes referenced by offset, not re-serialized
 //!
-//! This simplifies serialization:
-//! - Leaf -> Extend with value but no child (child_offset = 0)
-//! - Extension -> Extend with child but no value (value_offset = 0)
-//! - Branch -> Branch (unchanged)
+//! ## Two-Node Serialization Format:
+//! Instead of standard 3 node types (Branch, Extension, Leaf), we use 2:
+//! - **Branch**: 16 children slots + 1 value slot
+//! - **Extend**: 1 child slot + 1 value slot (represents both Extension and Leaf)
+//!
+//! Node type mapping:
+//! - Leaf → Extend with value but no child (child_offset = 0)
+//! - Extension → Extend with child but no value (value_offset = 0)
+//! - Branch → Branch (unchanged)
+//!
+//! ## File Structure:
+//! ```text
+//! [header: 8 bytes] -> offset to latest root
+//! [commit 1: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+//! [commit 2: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+//! [commit N: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+//! ```
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -36,7 +50,7 @@ pub struct Serializer {
 
 impl Serializer {
     /// Create a new incremental serializer with existing node index
-    pub fn new_incremental(node_index: &HashMap<NodeHash, u64>, base_offset: u64) -> Self {
+    pub fn new(node_index: &HashMap<NodeHash, u64>, base_offset: u64) -> Self {
         Self {
             buffer: Vec::new(),
             node_index: node_index.clone(),
@@ -46,9 +60,20 @@ impl Serializer {
     }
 
     /// Serializes a trie incrementally, only storing new nodes
-    pub fn serialize_tree_incremental(mut self, root: &Node) -> SerializationResult {
-        let root_offset = self.serialize_node(root)?;
-        Ok((self.buffer, self.new_nodes, root_offset))
+    /// Always prepends the previous root offset (0 for first root)
+    pub fn serialize_tree(mut self, root: &Node, prev_root_offset: u64) -> SerializationResult {
+        // Store where the root structure starts (including prepended offset)
+        let root_structure_offset = self.base_offset + self.buffer.len() as u64;
+
+        // Always prepend the previous root offset (0 for first root)
+        self.buffer
+            .extend_from_slice(&prev_root_offset.to_le_bytes());
+
+        // Serialize the actual root node
+        self.serialize_node(root)?;
+
+        // Return the offset to the start of the root structure (with prepended offset)
+        Ok((self.buffer, self.new_nodes, root_structure_offset))
     }
 
     /// Serializes a node, checking CoW first
@@ -409,11 +434,11 @@ mod test {
         trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new_incremental(&HashMap::new(), 0);
-        let (buffer, _, _) = serializer.serialize_tree_incremental(&root).unwrap();
+        let serializer = Serializer::new(&HashMap::new(), 0);
+        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
-        let recovered = deserializer.decode_node_at(0).unwrap();
+        let recovered = deserializer.decode_node_at(8).unwrap(); // Skip 8-byte prev root offset
 
         assert_eq!(root, recovered);
     }

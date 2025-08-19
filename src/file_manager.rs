@@ -4,13 +4,23 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-/// Responsible for file management and offsets
+/// File management with Copy-on-Write and versioning support
 ///
-/// File format:
+/// Manages persistent storage for EthrexDB with append-only writes and
+/// linked list versioning of root nodes.
+///
+/// File Format:
 /// ```text
-/// [header: 8 bytes] -> points to latest root offset
-/// [serialized trie nodes...]
+/// [header: 8 bytes] -> offset to latest root version
+/// [commit 1: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+/// [commit 2: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+/// [commit N: [prev_root_offset: 8 bytes][root_node][other_nodes]]
 /// ```
+///
+/// Each root node is prepended with the offset of the previous root, creating
+/// a linked list that allows traversal through all historical versions:
+/// - First root: `prev_root_offset = 0` (end of chain)
+/// - Subsequent roots: `prev_root_offset = previous_root_location`
 pub struct FileManager {
     /// File where the data is stored
     file: File,
