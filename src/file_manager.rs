@@ -8,21 +8,13 @@ use std::path::PathBuf;
 ///
 /// File format:
 /// ```text
-/// [header: 8 bytes] -> points to latest root version
-/// [version 1: [prev_offset: 8 bytes][nodes]]
-/// [version 2: [prev_offset: 8 bytes][nodes]]
-/// ...
-/// [version N: [prev_offset: 8 bytes][nodes]] <- latest version
+/// [header: 8 bytes] -> points to latest root offset
+/// [serialized trie nodes...]
 /// ```
-///
-/// Each version contains:
-/// - prev_offset: Points to the previous version
-/// - nodes: Serialized trie nodes
 pub struct FileManager {
     /// File where the data is stored
     file: File,
     /// Memory-mapped of the file
-    /// TODO: Handle case when adding new nodes
     mmap: Mmap,
 }
 
@@ -74,15 +66,12 @@ impl FileManager {
         Ok(u64::from_le_bytes(offset_bytes))
     }
 
-    /// Update the header to point to the new latest root version
+    /// Update the header to point to the new latest root offset
     pub fn update_latest_root_offset(&mut self, new_offset: u64) -> Result<(), TrieError> {
         self.file.seek(SeekFrom::Start(0)).unwrap();
         self.file.write_all(&new_offset.to_le_bytes()).unwrap();
         self.file.flush().unwrap();
-
-        // TODO: Check if this is needed
-        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
-
+        self.refresh_mmap();
         Ok(())
     }
 
@@ -91,11 +80,13 @@ impl FileManager {
         let offset = self.file.seek(SeekFrom::End(0)).unwrap();
         self.file.write_all(data).unwrap();
         self.file.flush().unwrap();
-
-        // TODO: Check if this is needed
-        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
-
+        self.refresh_mmap();
         Ok(offset)
+    }
+
+    /// Refresh memory map after file modifications
+    fn refresh_mmap(&mut self) {
+        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
     }
 
     /// Get the current file size

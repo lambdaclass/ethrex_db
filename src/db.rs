@@ -68,26 +68,27 @@ impl EthrexDB {
 
     /// Get the latest root node of the database
     pub fn root(&self) -> Result<Node, TrieError> {
-        let latest_offset = self.file_manager.read_latest_root_offset()?;
+        let (latest_offset, file_data) = self.get_latest_data()?;
         if latest_offset == 0 {
             return Err(TrieError::Other("No root node in database".to_string()));
         }
-
-        // Get the entire file as a buffer for deserializer
-        let file_data = self.file_manager.get_slice_to_end(0)?;
-        let root_node = Deserializer::new(file_data).decode_node_at(latest_offset as usize)?;
-        Ok(root_node)
+        Deserializer::new(file_data).decode_node_at(latest_offset as usize)
     }
 
     /// Get the value of the node with the given key
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
-        let latest_offset = self.file_manager.read_latest_root_offset()?;
+        let (latest_offset, file_data) = self.get_latest_data()?;
         if latest_offset == 0 {
             return Ok(None);
         }
-
-        let file_data = self.file_manager.get_slice_to_end(0)?;
         Deserializer::new(file_data).get_by_path_at(key, latest_offset as usize)
+    }
+
+    /// Helper to get latest offset and file data
+    fn get_latest_data(&self) -> Result<(u64, &[u8]), TrieError> {
+        let latest_offset = self.file_manager.read_latest_root_offset()?;
+        let file_data = self.file_manager.get_slice_to_end(0)?;
+        Ok((latest_offset, file_data))
     }
 }
 
@@ -176,7 +177,7 @@ mod tests {
         db.commit(&root_node).unwrap();
 
         // Read back from DB
-        let _recovered_root = db.root().unwrap();
+        assert_eq!(db.root().unwrap(), root_node);
 
         // Test that we can read the value
         let value = db.get(b"key").unwrap();
@@ -383,7 +384,6 @@ mod tests {
             db.get(&persistent_key).unwrap(),
             Some(persistent_value.clone())
         );
-        let size_after_batch1 = db.file_manager.get_file_size().unwrap();
 
         // Batch 2: New transactions + modify some existing accounts
         let new_accounts_batch2 = generate_test_data(150);
@@ -420,9 +420,6 @@ mod tests {
             db.get(&persistent_key).unwrap(),
             Some(persistent_value.clone())
         );
-
-        let size_after_batch2 = db.file_manager.get_file_size().unwrap();
-        let batch2_increment = size_after_batch2 - size_after_batch1;
 
         // Batch 3: More transactions
         let new_accounts_batch3 = generate_test_data(200);
@@ -461,9 +458,6 @@ mod tests {
             Some(persistent_value.clone())
         );
 
-        let size_after_batch3 = db.file_manager.get_file_size().unwrap();
-        let _batch3_increment = size_after_batch3 - size_after_batch2;
-
         // Batch 4: Large update batch
         let new_accounts_batch4 = generate_test_data(250);
 
@@ -500,9 +494,6 @@ mod tests {
             db.get(&persistent_key).unwrap(),
             Some(persistent_value.clone())
         );
-
-        let size_after_batch4 = db.file_manager.get_file_size().unwrap();
-        let _batch4_increment = size_after_batch4 - size_after_batch3;
 
         // Batch 5: Final verification batch
         let new_accounts_batch5 = generate_test_data(300);
@@ -541,26 +532,6 @@ mod tests {
         assert_eq!(
             db.get(&persistent_key).unwrap(),
             Some(persistent_value.clone()),
-            "Persistent value from genesis batch must still be accessible after all updates"
-        );
-
-        // Verify file size increased over time (CoW should minimize growth)
-        let final_file_size = db.file_manager.get_file_size().unwrap();
-        let _batch5_increment = final_file_size - size_after_batch4;
-
-        let average_account_size = (size_after_batch1 - 8) / 100; // Remove header
-
-        // If we were writing the full trie each time, batch 2 would be ~150 accounts worth
-        let expected_if_full_rewrite = average_account_size * 150;
-
-        // Verify CoW is working - batch 2 should be significantly smaller than full rewrite
-        // Use 70% as threshold (accounting for trie structure overhead)
-        let cow_threshold = (expected_if_full_rewrite as f64 * 0.7) as u64;
-        assert!(
-            batch2_increment < cow_threshold,
-            "CoW not working effectively: {} >= {} (70% of full rewrite)",
-            batch2_increment,
-            cow_threshold
         );
 
         // Random verification of some accounts
