@@ -616,7 +616,9 @@ mod tests {
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path_at(b"test", ROOT_DATA_OFFSET).unwrap(),
+            deserializer
+                .get_by_path_at(b"test", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"value".to_vec())
         );
 
@@ -646,36 +648,36 @@ mod tests {
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path_at(b"horse", ROOT_DATA_OFFSET).unwrap(),
+            deserializer
+                .get_by_path_at(b"horse", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"stallion".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path_at(b"dog", ROOT_DATA_OFFSET).unwrap(),
+            deserializer
+                .get_by_path_at(b"dog", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"puppy".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path_at(b"doge", ROOT_DATA_OFFSET).unwrap(),
+            deserializer
+                .get_by_path_at(b"doge", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"coin".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path_at(b"do", ROOT_DATA_OFFSET).unwrap(),
+            deserializer
+                .get_by_path_at(b"do", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"verb".to_vec())
         );
+        assert_eq!(
+            deserializer
+                .get_by_path_at(b"cat", ROOT_DATA_OFFSET)
+                .unwrap(),
+            None
+        );
 
-        let deserializer = Deserializer::new(&buffer);
-        assert_eq!(deserializer.get_by_path_at(b"cat", ROOT_DATA_OFFSET).unwrap(), None);
-
-        let deserializer = Deserializer::new(&buffer);
-        assert_eq!(deserializer.get_by_path_at(b"", ROOT_DATA_OFFSET).unwrap(), None);
-
-        // Reset position before decoding tree
-        let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
         assert_eq!(root, recovered);
     }

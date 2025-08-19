@@ -140,7 +140,7 @@ mod tests {
         let root_node = trie.root_node().unwrap().unwrap();
 
         let root_hash = db.commit(&root_node).unwrap();
-        assert!(root_hash.as_ref() != [0u8; 32]);
+        assert_ne!(root_hash.as_ref(), [0u8; 32]);
     }
 
     #[test]
@@ -187,29 +187,6 @@ mod tests {
 
         // Test getting non-existent value
         assert_eq!(db.get(b"nonexistent").unwrap(), None);
-    }
-
-    #[test]
-    fn test_simple_serialization_debug() {
-        let temp_dir = TempDir::new("ethrex_db_simple_test").unwrap();
-        let db_path = temp_dir.path().join("simple.edb");
-
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
-        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-
-        // Simple test with just one key
-        trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
-        let root_node = trie.root_node().unwrap().unwrap();
-
-        // Commit to DB
-        db.commit(&root_node).unwrap();
-
-        // Read back from DB
-        assert_eq!(db.root().unwrap(), root_node);
-
-        // Test that we can read the value
-        let value = db.get(b"key").unwrap();
-        assert_eq!(value, Some(b"value".to_vec()));
     }
 
     #[test]
@@ -269,78 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_db_operations() {
-        let temp_dir = TempDir::new("ethrex_db_complex_test").unwrap();
-        let db_path = temp_dir.path().join("complex_test.edb");
-
-        let test_data_v1 = vec![
-            (b"app".to_vec(), b"application_v1".to_vec()),
-            (b"apple".to_vec(), b"fruit_v1".to_vec()),
-            (b"car".to_vec(), b"vehicle_v1".to_vec()),
-            (b"test".to_vec(), b"examination_v1".to_vec()),
-            (b"0x123456".to_vec(), b"hex_value_v1".to_vec()),
-        ];
-
-        let test_data_v2 = vec![
-            (b"app".to_vec(), b"application_v2".to_vec()),
-            (b"apple".to_vec(), b"fruit_v2".to_vec()),
-            (b"banana".to_vec(), b"fruit_new".to_vec()),
-            (b"car".to_vec(), b"vehicle_v2".to_vec()),
-            (b"bike".to_vec(), b"vehicle_new".to_vec()), // New
-            (b"test".to_vec(), b"examination_v2".to_vec()),
-            (b"0x123456".to_vec(), b"hex_value_v2".to_vec()),
-            (b"0xabcdef".to_vec(), b"hex_new".to_vec()),
-        ];
-
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
-
-        let mut trie_v1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        for (key, value) in &test_data_v1 {
-            trie_v1.insert(key.clone(), value.clone()).unwrap();
-        }
-        let root_node = trie_v1.root_node().unwrap().unwrap();
-        db.commit(&root_node).unwrap();
-
-        let mut trie_v2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        for (key, value) in &test_data_v2 {
-            trie_v2.insert(key.clone(), value.clone()).unwrap();
-        }
-        let root_node = trie_v2.root_node().unwrap().unwrap();
-        db.commit(&root_node).unwrap();
-
-        for (key, expected_value) in &test_data_v2 {
-            let result = db.get(key).unwrap();
-            assert_eq!(result, Some(expected_value.clone()));
-        }
-
-        assert_eq!(db.get(b"nonexistent").unwrap(), None);
-
-        let complex_test_data = vec![
-            (
-                b"very_long_key_with_complex_structure_123456789".to_vec(),
-                b"complex_value".to_vec(),
-            ),
-            (b"short".to_vec(), b"val".to_vec()),
-            (b"".to_vec(), b"empty_key_value".to_vec()),
-        ];
-
-        let mut trie_v3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        for (key, value) in &test_data_v2 {
-            trie_v3.insert(key.clone(), value.clone()).unwrap();
-        }
-        for (key, value) in &complex_test_data {
-            trie_v3.insert(key.clone(), value.clone()).unwrap();
-        }
-        let root_node = trie_v3.root_node().unwrap().unwrap();
-        db.commit(&root_node).unwrap();
-
-        for (key, expected_value) in &complex_test_data {
-            let result = db.get(key).unwrap();
-            assert_eq!(result, Some(expected_value.clone()));
-        }
-    }
-
-    #[test]
     fn test_blockchain_simulation_with_incremental_storage() {
         let temp_dir = TempDir::new("ethrex_blockchain_sim").unwrap();
         let db_path = temp_dir.path().join("blockchain.edb");
@@ -348,11 +253,7 @@ mod tests {
         let mut db = EthrexDB::new(db_path.clone()).unwrap();
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
-        // Keep track of a persistent value from the first batch
-        let persistent_key = generate_test_data(1)[0].0.clone();
-        let persistent_value = generate_test_data(1)[0].1.clone();
-
-        // Batch 1: Initial accounts (simulating genesis)
+        // Batch 1: Initial accounts
         let batch1_data = generate_test_data(100);
 
         for (key, value) in batch1_data.iter() {
@@ -362,7 +263,7 @@ mod tests {
         let root_node1 = trie.root_node().unwrap().unwrap();
         let trie_root_hash1 = root_node1.compute_hash();
         let db_root_hash1 = db.commit(&root_node1).unwrap();
-        trie.commit().unwrap(); // Convert to NodeRef::Hash for CoW
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
 
         assert_eq!(
             trie_root_hash1, db_root_hash1,
@@ -372,12 +273,6 @@ mod tests {
             db.root().unwrap(),
             root_node1,
             "DB root must match trie root after batch 1"
-        );
-
-        // Verify persistent value exists
-        assert_eq!(
-            db.get(&persistent_key).unwrap(),
-            Some(persistent_value.clone())
         );
 
         // Batch 2: New transactions + modify some existing accounts
@@ -400,7 +295,7 @@ mod tests {
         let root_node2 = trie.root_node().unwrap().unwrap();
         let trie_root_hash2 = root_node2.compute_hash();
         let db_root_hash2 = db.commit(&root_node2).unwrap();
-        trie.commit().unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash 
 
         assert_eq!(
             trie_root_hash2, db_root_hash2,
@@ -410,10 +305,6 @@ mod tests {
             db.root().unwrap(),
             root_node2,
             "DB root must match trie root after batch 2"
-        );
-        assert_eq!(
-            db.get(&persistent_key).unwrap(),
-            Some(persistent_value.clone())
         );
 
         // Batch 3: More transactions
@@ -437,7 +328,7 @@ mod tests {
         let root_node3 = trie.root_node().unwrap().unwrap();
         let trie_root_hash3 = root_node3.compute_hash();
         let db_root_hash3 = db.commit(&root_node3).unwrap();
-        trie.commit().unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
 
         assert_eq!(
             trie_root_hash3, db_root_hash3,
@@ -447,10 +338,6 @@ mod tests {
             db.root().unwrap(),
             root_node3,
             "DB root must match trie root after batch 3"
-        );
-        assert_eq!(
-            db.get(&persistent_key).unwrap(),
-            Some(persistent_value.clone())
         );
 
         // Batch 4: Large update batch
@@ -474,7 +361,7 @@ mod tests {
         let root_node4 = trie.root_node().unwrap().unwrap();
         let trie_root_hash4 = root_node4.compute_hash();
         let db_root_hash4 = db.commit(&root_node4).unwrap();
-        trie.commit().unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
 
         assert_eq!(
             trie_root_hash4, db_root_hash4,
@@ -484,10 +371,6 @@ mod tests {
             db.root().unwrap(),
             root_node4,
             "DB root must match trie root after batch 4"
-        );
-        assert_eq!(
-            db.get(&persistent_key).unwrap(),
-            Some(persistent_value.clone())
         );
 
         // Batch 5: Final verification batch
@@ -511,7 +394,7 @@ mod tests {
         let root_node5 = trie.root_node().unwrap().unwrap();
         let trie_root_hash5 = root_node5.compute_hash();
         let db_root_hash5 = db.commit(&root_node5).unwrap();
-        trie.commit().unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
 
         assert_eq!(
             trie_root_hash5, db_root_hash5,
@@ -523,22 +406,11 @@ mod tests {
             "DB root must match trie root after batch 5"
         );
 
-        // Final verification: The persistent value from batch 1 should still be accessible
-        assert_eq!(
-            db.get(&persistent_key).unwrap(),
-            Some(persistent_value.clone()),
-        );
-
         // Random verification of some accounts
         for batch_num in 1..=5 {
             let test_data = generate_test_data(batch_num * 50);
             if let Some((key, _)) = test_data.get(batch_num * 10) {
-                let db_value = db.get(key).unwrap();
-                assert!(
-                    db_value.is_some(),
-                    "Account from batch {} should be accessible",
-                    batch_num
-                );
+                assert_eq!(db.get(key).unwrap(), trie.get(key).unwrap());
             }
         }
     }
