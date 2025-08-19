@@ -1,4 +1,13 @@
 //! EthrexDB - Copy-on-Write Merkle Patricia Trie Database
+//!
+//! The database implements Copy-on-Write (CoW) optimization where only modified nodes
+//! are written during commits. Unchanged nodes are referenced by their file offset,
+//! avoiding duplication. All writes are append-only - data is never overwritten,
+//! only appended to the end of the file.
+//!
+//! Each commit creates a new root that links to the previous root via a prepended
+//! offset, forming a linked list of all historical states. This allows traversing
+//! the entire version history if needed.
 
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, Serializer};

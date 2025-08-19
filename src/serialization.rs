@@ -1,28 +1,49 @@
-//! Incremental serialization with Copy-on-Write optimization
+//! Serialization and deserialization of the trie.
 //!
-//! ## Core Features:
-//! - **Copy-on-Write (CoW)**: Only new/modified nodes are serialized
-//! - **Linked List Versioning**: Each root has prepended offset to previous root
-//! - **Append-Only Storage**: Data is only added, never overwritten
-//! - **Node Reuse**: Existing nodes referenced by offset, not re-serialized
+//! This module implements a two-node serialization format that reduces the standard
+//! three MPT node types ([`BranchNode`], [`ExtensionNode`], [`LeafNode`]) to just two:
+//! `Branch` and `Extend`.
+//! The `Extend` node cleverly represents both `Extension` and `Leaf` nodes based on which fields are populated.
 //!
-//! ## Two-Node Serialization Format:
-//! Instead of standard 3 node types (Branch, Extension, Leaf), we use 2:
-//! - **Branch**: 16 children slots + 1 value slot
-//! - **Extend**: 1 child slot + 1 value slot (represents both Extension and Leaf)
+//! File Structure:
+//! Each commit in the file has the following layout:
 //!
-//! Node type mapping:
-//! - Leaf → Extend with value but no child (child_offset = 0)
-//! - Extension → Extend with child but no value (value_offset = 0)
-//! - Branch → Branch (unchanged)
-//!
-//! ## File Structure:
 //! ```text
-//! [header: 8 bytes] -> offset to latest root
-//! [commit 1: [prev_root_offset: 8 bytes][root_node][other_nodes]]
-//! [commit 2: [prev_root_offset: 8 bytes][root_node][other_nodes]]
-//! [commit N: [prev_root_offset: 8 bytes][root_node][other_nodes]]
+//! [prev_root_offset: 8 bytes]  // Links to previous root (0 for first commit)
+//! [root_node_data]              // Root node serialized first
+//! [child_nodes_data...]         // Children in depth-first order
 //! ```
+//!
+//! Node Serialization Format:
+//!
+//! Branch Node:
+//! ```text
+//! [tag: 1 byte = 0x00]
+//! [child_offsets: 16 * 8 bytes]  // Offsets to 16 possible children (0 if empty)
+//! [value_offset: 8 bytes]         // Offset to value data (0 if no value)
+//! ```
+//!
+//! Extend Node (Extension or Leaf):
+//! - If the value is empty and the child is not zero, it's an Extension node.
+//! - If the value is not empty and the child is zero, it's a Leaf node.
+//!
+//! ```text
+//! [tag: 1 byte = 0x01]
+//! [nibbles_len: 4 bytes]
+//! [nibbles_data: variable]
+//! [child_offset: 8 bytes]   // 0 for Leaf, valid offset for Extension
+//! [value_offset: 8 bytes]   // Valid offset for Leaf, 0 for Extension
+//! ```
+//!
+//! Copy-on-Write:
+//! During [`Serializer::serialize_tree`], each node is checked against the
+//! [`Serializer::node_index`]. If the node's hash already exists, its offset is
+//! returned immediately without re-serialization. This means unchanged subtrees
+//! are never duplicated - they're referenced by offset.
+//!
+//! The serialization order is depth-first, with the root always first after the
+//! `prev_root_offset`. This allows offsets to be calculated during serialization
+//! as children are written immediately after their parents (unless they already exist).
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -42,14 +63,18 @@ const TAG_EXTEND: u8 = 1;
 /// Serializes a Merkle Patricia Trie into a byte buffer using the two node format
 #[derive(Default)]
 pub struct Serializer {
+    /// Buffer to store the serialized data
     buffer: Vec<u8>,
+    /// Index of the nodes in the buffer
     node_index: HashMap<NodeHash, u64>,
+    /// Serialized nodes in this batch
     new_nodes: HashMap<NodeHash, u64>,
+    /// Base offset of the buffer
     base_offset: u64,
 }
 
 impl Serializer {
-    /// Create a new incremental serializer with existing node index
+    /// Create a new serializer with existing node index
     pub fn new(node_index: &HashMap<NodeHash, u64>, base_offset: u64) -> Self {
         Self {
             buffer: Vec::new(),
@@ -59,10 +84,10 @@ impl Serializer {
         }
     }
 
-    /// Serializes a trie incrementally, only storing new nodes
+    /// Serializes a trie, only storing new nodes
     /// Always prepends the previous root offset (0 for first root)
     pub fn serialize_tree(mut self, root: &Node, prev_root_offset: u64) -> SerializationResult {
-        // Store where the root structure starts (including prepended offset)
+        // Store where the root structure starts
         let root_structure_offset = self.base_offset + self.buffer.len() as u64;
 
         // Always prepend the previous root offset (0 for first root)
@@ -80,12 +105,10 @@ impl Serializer {
     fn serialize_node(&mut self, node: &Node) -> Result<u64, TrieError> {
         let hash = node.compute_hash();
 
-        // Check if node already exists (CoW)
         if let Some(&existing_offset) = self.node_index.get(&hash) {
             return Ok(existing_offset);
         }
 
-        // Check if we already serialized this node in this batch
         if let Some(&absolute_offset) = self.new_nodes.get(&hash) {
             return Ok(absolute_offset);
         }
@@ -181,6 +204,7 @@ impl Serializer {
     fn serialize_noderef(&mut self, noderef: &NodeRef) -> Result<u64, TrieError> {
         match noderef {
             NodeRef::Hash(hash) if hash.is_valid() => {
+                // Node was previously committed - must exist in index
                 self.node_index.get(hash).copied().ok_or_else(|| {
                     TrieError::Other(format!("Hash reference not found: {:?}", hash))
                 })

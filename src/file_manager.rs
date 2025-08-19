@@ -1,35 +1,42 @@
+//! File management
+//!
+//! The FileManager handles all low-level file operations for `EthrexDB`, implementing
+//! an append-only storage strategy where data is never overwritten. All writes go
+//! to the end of the file, preserving historical data and enabling version traversal.
+//!
+//! File Layout:
+//! ```text
+//! Offset 0: [header: 8 bytes]     // Points to latest root offset
+//! Offset 8: [commit_1_data...]    // First commit's data
+//! Offset X: [commit_2_data...]    // Second commit's data
+//! Offset Y: [commit_N_data...]    // Latest commit's data
+//! ```
+//!
+//! The header at offset 0 always contains the offset of the most recent root.
+//! This is the only part of the file that gets updated in-place. Everything else
+//! is append-only.
+//!
+//! Each commit's data starts with an 8-byte link to the previous root offset,
+//! creating a linked list through all versions:
+//! - First commit: prev_root_offset = 0 (marks end of chain)
+//! - Later commits: prev_root_offset = offset of previous root
+
 use crate::trie::TrieError;
 use memmap2::{Mmap, MmapOptions};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-/// File management with Copy-on-Write and versioning support
-///
-/// Manages persistent storage for EthrexDB with append-only writes and
-/// linked list versioning of root nodes.
-///
-/// File Format:
-/// ```text
-/// [header: 8 bytes] -> offset to latest root version
-/// [commit 1: [prev_root_offset: 8 bytes][root_node][other_nodes]]
-/// [commit 2: [prev_root_offset: 8 bytes][root_node][other_nodes]]
-/// [commit N: [prev_root_offset: 8 bytes][root_node][other_nodes]]
-/// ```
-///
-/// Each root node is prepended with the offset of the previous root, creating
-/// a linked list that allows traversal through all historical versions:
-/// - First root: `prev_root_offset = 0` (end of chain)
-/// - Subsequent roots: `prev_root_offset = previous_root_location`
+/// File manager for `EthrexDB`
 pub struct FileManager {
     /// File where the data is stored
     file: File,
-    /// Memory-mapped of the file
+    /// Memory-mapped view of the file
     mmap: Mmap,
 }
 
 impl FileManager {
-    /// Create a new database file
+    /// Create a new file
     pub fn create(file_path: PathBuf) -> Result<Self, TrieError> {
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
