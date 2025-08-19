@@ -51,7 +51,7 @@ impl EthrexDB {
 
         self.file_manager.write_at_end(&serialized_data)?;
 
-        // Update node index with new node offsets (they are already absolute)
+        // Update node index with new node offsets
         for (hash, absolute_offset) in new_offsets {
             self.node_index.insert(hash, absolute_offset);
         }
@@ -113,6 +113,39 @@ mod tests {
 
     use super::*;
     use tempdir::TempDir;
+
+    // Helper function to generate test data
+    fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        use sha3::{Digest, Keccak256};
+
+        (1..=n)
+            .map(|i| {
+                // 32-byte key (hash)
+                let key = Keccak256::new()
+                    .chain_update(i.to_be_bytes())
+                    .finalize()
+                    .to_vec();
+
+                // 104-byte value (account info: 2 hashes + u256 + u64)
+                let mut value = Vec::with_capacity(104);
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 2).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 3).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(&[0u8; 24]); // u256 padding
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u256 value
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u64
+
+                (key, value)
+            })
+            .collect()
+    }
 
     #[test]
     fn test_create_and_commit() {
@@ -325,39 +358,6 @@ mod tests {
             let result = db.get(key).unwrap();
             assert_eq!(result, Some(expected_value.clone()));
         }
-    }
-
-    // Helper function to generate test data (like the benchmark)
-    fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-        use sha3::{Digest, Keccak256};
-
-        (1..=n)
-            .map(|i| {
-                // 32-byte key (hash)
-                let key = Keccak256::new()
-                    .chain_update(i.to_be_bytes())
-                    .finalize()
-                    .to_vec();
-
-                // 104-byte value (account info: 2 hashes + u256 + u64)
-                let mut value = Vec::with_capacity(104);
-                value.extend_from_slice(
-                    &Keccak256::new()
-                        .chain_update((i * 2).to_be_bytes())
-                        .finalize(),
-                );
-                value.extend_from_slice(
-                    &Keccak256::new()
-                        .chain_update((i * 3).to_be_bytes())
-                        .finalize(),
-                );
-                value.extend_from_slice(&[0u8; 24]); // u256 padding
-                value.extend_from_slice(&(i as u64).to_be_bytes()); // u256 value
-                value.extend_from_slice(&(i as u64).to_be_bytes()); // u64
-
-                (key, value)
-            })
-            .collect()
     }
 
     #[test]

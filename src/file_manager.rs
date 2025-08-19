@@ -161,8 +161,14 @@ mod tests {
 
         {
             let mut fm = FileManager::create(file_path.clone()).unwrap();
+            assert_eq!(
+                fm.get_file_size().unwrap(),
+                8,
+                "File is empty but should have 8 bytes for the header"
+            );
             fm.update_latest_root_offset(456).unwrap();
             fm.write_at_end(b"persistent data").unwrap();
+            assert_ne!(fm.get_file_size().unwrap(), 8);
         }
 
         let fm = FileManager::open(file_path).unwrap();
@@ -170,5 +176,6 @@ mod tests {
 
         let data = fm.get_slice_to_end(8).unwrap().to_vec();
         assert_eq!(data, b"persistent data");
+        assert_ne!(fm.get_file_size().unwrap(), 8);
     }
 }
