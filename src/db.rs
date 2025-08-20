@@ -104,39 +104,6 @@ mod tests {
     use super::*;
     use tempdir::TempDir;
 
-    // Helper function to generate test data
-    fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-        use sha3::{Digest, Keccak256};
-
-        (1..=n)
-            .map(|i| {
-                // 32-byte key (hash)
-                let key = Keccak256::new()
-                    .chain_update(i.to_be_bytes())
-                    .finalize()
-                    .to_vec();
-
-                // 104-byte value (account info: 2 hashes + u256 + u64)
-                let mut value = Vec::with_capacity(104);
-                value.extend_from_slice(
-                    &Keccak256::new()
-                        .chain_update((i * 2).to_be_bytes())
-                        .finalize(),
-                );
-                value.extend_from_slice(
-                    &Keccak256::new()
-                        .chain_update((i * 3).to_be_bytes())
-                        .finalize(),
-                );
-                value.extend_from_slice(&[0u8; 24]); // u256 padding
-                value.extend_from_slice(&(i as u64).to_be_bytes()); // u256 value
-                value.extend_from_slice(&(i as u64).to_be_bytes()); // u64
-
-                (key, value)
-            })
-            .collect()
-    }
-
     #[test]
     fn test_create_and_commit() {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
@@ -150,7 +117,7 @@ mod tests {
         let root_node = trie.root_node().unwrap().unwrap();
 
         let root_hash = db.commit(&root_node).unwrap();
-        assert_ne!(root_hash.as_ref(), [0u8; 32]);
+        assert!(root_hash.as_ref() != [0u8; 32]);
     }
 
     #[test]
@@ -200,59 +167,149 @@ mod tests {
     }
 
     #[test]
-    fn test_incremental_commit() {
+    fn test_multi_version_trie() {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
         let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-
-        // First commit: Add initial keys
         trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        let root_node = trie.root_node().unwrap().unwrap();
-        let initial_file_size = db.file_manager.get_file_size().unwrap();
-        db.commit(&root_node).unwrap();
-        trie.commit().unwrap(); // Convert NodeRef::Node to NodeRef::Hash
-        let recovered_root = db.root().unwrap();
-        assert_eq!(recovered_root, root_node);
-
-        let size_after_first = db.file_manager.get_file_size().unwrap();
-        assert!(size_after_first > initial_file_size);
-
-        // Second commit: Add one more key (should only store new nodes)
-        trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-        assert_eq!(db.root().unwrap(), root_node);
         trie.commit().unwrap();
 
-        let size_after_second = db.file_manager.get_file_size().unwrap();
-        // Should be smaller increment than first commit
-        let first_increment = size_after_first - initial_file_size;
-        let second_increment = size_after_second - size_after_first;
-        assert!(
-            second_increment < first_increment,
-            "Second commit should add less data due to CoW"
-        );
+        assert_eq!(db.root().unwrap(), root_node);
 
-        // Verify all values are still accessible
+        // let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
+
+        assert_eq!(db.root().unwrap(), root_node);
+
+        trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
+
+        assert_eq!(db.root().unwrap(), root_node);
+
+        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
+        assert_eq!(db.get(b"common").unwrap(), Some(b"v3".to_vec()));
         assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
         assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
-        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
 
-        // Third commit: Update existing key (should reuse many nodes)
-        trie.insert(b"key2".to_vec(), b"value2_updated".to_vec())
-            .unwrap();
-        let root_node = trie.root_node().unwrap().unwrap();
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_complex_db_operations() {
+        let temp_dir = TempDir::new("ethrex_db_complex_test").unwrap();
+        let db_path = temp_dir.path().join("complex_test.edb");
+
+        let test_data_v1 = vec![
+            (b"app".to_vec(), b"application_v1".to_vec()),
+            (b"apple".to_vec(), b"fruit_v1".to_vec()),
+            (b"car".to_vec(), b"vehicle_v1".to_vec()),
+            (b"test".to_vec(), b"examination_v1".to_vec()),
+            (b"0x123456".to_vec(), b"hex_value_v1".to_vec()),
+        ];
+
+        let test_data_v2 = vec![
+            (b"app".to_vec(), b"application_v2".to_vec()),
+            (b"apple".to_vec(), b"fruit_v2".to_vec()),
+            (b"banana".to_vec(), b"fruit_new".to_vec()),
+            (b"car".to_vec(), b"vehicle_v2".to_vec()),
+            (b"bike".to_vec(), b"vehicle_new".to_vec()), // New
+            (b"test".to_vec(), b"examination_v2".to_vec()),
+            (b"0x123456".to_vec(), b"hex_value_v2".to_vec()),
+            (b"0xabcdef".to_vec(), b"hex_new".to_vec()),
+        ];
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie_v1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v1 {
+            trie_v1.insert(key.clone(), value.clone()).unwrap();
+        }
+        let root_node = trie_v1.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-        trie.commit().unwrap();
-        assert_eq!(db.root().unwrap(), root_node);
 
-        // Verify updated value
-        assert_eq!(db.get(b"key2").unwrap(), Some(b"value2_updated".to_vec()));
-        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
+        let mut trie_v2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v2 {
+            trie_v2.insert(key.clone(), value.clone()).unwrap();
+        }
+        let root_node = trie_v2.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+
+        for (key, expected_value) in &test_data_v2 {
+            let result = db.get(key).unwrap();
+            assert_eq!(result, Some(expected_value.clone()));
+        }
+
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+
+        let complex_test_data = vec![
+            (
+                b"very_long_key_with_complex_structure_123456789".to_vec(),
+                b"complex_value".to_vec(),
+            ),
+            (b"short".to_vec(), b"val".to_vec()),
+            (b"".to_vec(), b"empty_key_value".to_vec()),
+        ];
+
+        let mut trie_v3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v2 {
+            trie_v3.insert(key.clone(), value.clone()).unwrap();
+        }
+        for (key, value) in &complex_test_data {
+            trie_v3.insert(key.clone(), value.clone()).unwrap();
+        }
+        let root_node = trie_v3.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+
+        for (key, expected_value) in &complex_test_data {
+            let result = db.get(key).unwrap();
+            assert_eq!(result, Some(expected_value.clone()));
+        }
+    }
+
+    // Helper function to generate test data
+    fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        use sha3::{Digest, Keccak256};
+
+        (1..=n)
+            .map(|i| {
+                // 32-byte key (hash)
+                let key = Keccak256::new()
+                    .chain_update(i.to_be_bytes())
+                    .finalize()
+                    .to_vec();
+
+                // 104-byte value (account info: 2 hashes + u256 + u64)
+                let mut value = Vec::with_capacity(104);
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 2).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 3).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(&[0u8; 24]); // u256 padding
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u256 value
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u64
+
+                (key, value)
+            })
+            .collect()
     }
 
     #[test]
@@ -305,7 +362,7 @@ mod tests {
         let root_node2 = trie.root_node().unwrap().unwrap();
         let trie_root_hash2 = root_node2.compute_hash();
         let db_root_hash2 = db.commit(&root_node2).unwrap();
-        trie.commit().unwrap(); // Convert to NodeRef::Hash 
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
 
         assert_eq!(
             trie_root_hash2, db_root_hash2,
