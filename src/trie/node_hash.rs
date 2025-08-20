@@ -1,6 +1,6 @@
 use crate::rlp::{Encoder, RLPDecode, RLPDecodeError, RLPEncode};
 use ethereum_types::H256;
-#[cfg(test)]
+#[cfg(feature = "libmdbx-benchmark")]
 use libmdbx::orm::{Decodable, Encodable};
 use sha3::{Digest, Keccak256};
 
@@ -38,7 +38,7 @@ impl NodeHash {
     /// Converts a slice of an already hashed data (in case it's not inlineable) to a NodeHash.
     /// Panics if the slice is over 32 bytes
     /// If you need to hash it in case its len >= 32 see `from_encoded_raw`
-    pub(crate) fn from_slice(slice: &[u8]) -> NodeHash {
+    pub fn from_slice(slice: &[u8]) -> NodeHash {
         match slice.len() {
             0..32 => {
                 let mut buffer = [0; 31];
@@ -141,7 +141,7 @@ impl RLPDecode for NodeHash {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "libmdbx-benchmark")]
 impl Encodable for NodeHash {
     type Encoded = Vec<u8>;
 
@@ -150,7 +150,7 @@ impl Encodable for NodeHash {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "libmdbx-benchmark")]
 impl Decodable for NodeHash {
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
         Ok(NodeHash::from_slice(b))

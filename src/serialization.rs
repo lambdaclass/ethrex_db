@@ -45,6 +45,7 @@
 //! `prev_root_offset`. This allows offsets to be calculated during serialization
 //! as children are written immediately after their parents (unless they already exist).
 
+use crate::index::Index;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -61,24 +62,23 @@ const TAG_BRANCH: u8 = 0;
 const TAG_EXTEND: u8 = 1;
 
 /// Serializes a Merkle Patricia Trie into a byte buffer using the two node format
-#[derive(Default)]
-pub struct Serializer {
+pub struct Serializer<'a> {
     /// Buffer to store the serialized data
     buffer: Vec<u8>,
     /// Index of the nodes in the buffer
-    node_index: HashMap<NodeHash, u64>,
+    node_index: &'a Index,
     /// Serialized nodes in this batch
     new_nodes: HashMap<NodeHash, u64>,
     /// Base offset of the buffer
     base_offset: u64,
 }
 
-impl Serializer {
+impl<'a> Serializer<'a> {
     /// Create a new serializer with existing node index
-    pub fn new(node_index: &HashMap<NodeHash, u64>, base_offset: u64) -> Self {
+    pub fn new(node_index: &'a Index, base_offset: u64) -> Self {
         Self {
             buffer: Vec::new(),
-            node_index: node_index.clone(),
+            node_index,
             new_nodes: HashMap::new(),
             base_offset,
         }
@@ -105,7 +105,7 @@ impl Serializer {
     fn serialize_node(&mut self, node: &Node) -> Result<u64, TrieError> {
         let hash = node.compute_hash();
 
-        if let Some(&existing_offset) = self.node_index.get(&hash) {
+        if let Some(existing_offset) = self.node_index.get(&hash) {
             return Ok(existing_offset);
         }
 
@@ -205,7 +205,7 @@ impl Serializer {
         match noderef {
             NodeRef::Hash(hash) if hash.is_valid() => {
                 // Node was previously committed - must exist in index
-                self.node_index.get(hash).copied().ok_or_else(|| {
+                self.node_index.get(hash).ok_or_else(|| {
                     TrieError::Other(format!("Hash reference not found: {:?}", hash))
                 })
             }
@@ -462,7 +462,8 @@ mod tests {
             value: b"long_path_value".to_vec(),
         });
 
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&leaf, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -478,7 +479,8 @@ mod tests {
             value: vec![],
         }));
 
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&branch, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -499,7 +501,8 @@ mod tests {
             child: NodeRef::Node(Arc::new(leaf), OnceLock::new()),
         });
 
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&ext, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -549,7 +552,8 @@ mod tests {
             child: NodeRef::Node(Arc::new(branch), OnceLock::new()),
         });
 
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&outer_ext, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -571,7 +575,8 @@ mod tests {
         trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -595,7 +600,8 @@ mod tests {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -614,7 +620,8 @@ mod tests {
 
         // Serialize to file
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         let path = "/tmp/test_trie.mpt";
@@ -635,7 +642,8 @@ mod tests {
         trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -667,7 +675,8 @@ mod tests {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         let deserializer = Deserializer::new(&buffer);
@@ -757,7 +766,8 @@ mod tests {
 
         let root = trie.root_node().unwrap().unwrap();
 
-        let serializer = Serializer::new(&HashMap::new(), 0);
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
         let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
 
         for (key, expected_value) in &test_data {

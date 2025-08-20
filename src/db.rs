@@ -10,9 +10,9 @@
 //! the entire version history if needed.
 
 use crate::file_manager::FileManager;
+use crate::index::Index;
 use crate::serialization::{Deserializer, Serializer};
 use crate::trie::{Node, NodeHash, TrieError};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Ethrex DB struct
@@ -20,26 +20,27 @@ pub struct EthrexDB {
     /// File manager
     file_manager: FileManager,
     /// Index mapping node hashes to their file offsets
-    node_index: HashMap<NodeHash, u64>,
+    node_index: Index,
 }
 
 impl EthrexDB {
     /// Create a new database
     pub fn new(file_path: PathBuf) -> Result<Self, TrieError> {
-        let file_manager = FileManager::create(file_path)?;
+        let file_manager = FileManager::create(file_path.clone())?;
+        let node_index = Index::new();
         Ok(Self {
             file_manager,
-            node_index: HashMap::new(),
+            node_index,
         })
     }
 
     /// Open an existing database
     pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
-        let file_manager = FileManager::open(file_path)?;
-        // TODO: Load node_index from file
+        let file_manager = FileManager::open(file_path.clone())?;
+        let node_index = Index::new();
         Ok(Self {
             file_manager,
-            node_index: HashMap::new(),
+            node_index,
         })
     }
 

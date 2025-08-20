@@ -434,6 +434,7 @@ dependencies = [
  "criterion",
  "ethereum-types",
  "hasher",
+ "hex",
  "hex-literal",
  "lazy_static",
  "libmdbx",
