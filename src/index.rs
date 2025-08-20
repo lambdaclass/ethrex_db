@@ -1,15 +1,12 @@
-//! Simple in-memory index for O(1) hash -> offset lookups
-//!
-//! This module provides a pure HashMap-based index with no persistence.
-//! The index is rebuilt automatically when needed from the main database file.
+//! Simple in-memory index: [`NodeHash`] -> offset lookups
 
 use crate::trie::NodeHash;
 use std::collections::HashMap;
 
-/// Simple in-memory index - pure HashMap
+/// Simple in-memory index
 #[derive(Debug, Default)]
 pub struct Index {
-    /// Index map for O(1) lookups
+    /// Index map
     data: HashMap<NodeHash, u64>,
 }
 

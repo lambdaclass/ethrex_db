@@ -1,4 +1,4 @@
-//! EthrexDB - Copy-on-Write Merkle Patricia Trie Database
+//! EthrexDB - Merkle Patricia Trie Database
 //!
 //! The database implements Copy-on-Write (CoW) optimization where only modified nodes
 //! are written during commits. Unchanged nodes are referenced by their file offset,

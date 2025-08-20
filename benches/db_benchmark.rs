@@ -4,7 +4,7 @@
 //! - Random hash keys (like real accounts)
 //! - 104-byte account info (2 hashes + u256 + u64)
 //! - 1% random read samples (10x more reads)
-//! - Multiple scales: 10k, 100k, 500k, 1M, 10M accounts
+//! - Multiple scales: 10k, 100k, 500k and 1M accounts
 
 use ethrexdb::EthrexDB;
 use ethrexdb::trie::{InMemoryTrieDB, NodeHash, Trie, TrieDB, TrieError};
@@ -60,21 +60,22 @@ table!(
     (TestNodes) NodeHash => Vec<u8>
 );
 
-/// Creates a new temporary DB
-fn new_db<T: Table>() -> Arc<Database> {
+/// Create a libmdbx database with a specific path
+fn new_db_with_path<T: Table>(path: PathBuf) -> Arc<Database> {
     use libmdbx::{DatabaseOptions, Mode, ReadWriteOptions};
 
     let tables = [table_info!(T)].into_iter().collect();
     let options = DatabaseOptions {
         mode: Mode::ReadWrite(ReadWriteOptions {
-            max_size: Some(2 * 1024 * 1024 * 1024), // 2GB instead of default
+            max_size: Some(2 * 1024 * 1024 * 1024),
             ..Default::default()
         }),
         ..Default::default()
     };
 
     Arc::new(
-        Database::create_with_options(None, options, &tables).expect("Failed to create temp DB"),
+        Database::create_with_options(Some(path), options, &tables)
+            .expect("Failed to create DB with path"),
     )
 }
 
@@ -123,57 +124,39 @@ where
 
 #[derive(Debug)]
 struct BenchmarkResults {
-    db_name: String,
     total_accounts: usize,
     write_time_ms: u64,
     read_time_ms: u64,
-    reads_per_sec: f64,
 }
 
 fn run_ethrex_benchmark(
     accounts: &[(Vec<u8>, Vec<u8>)],
     sample_keys: &[Vec<u8>],
 ) -> Result<BenchmarkResults, Box<dyn std::error::Error>> {
-    println!("🔥 EthrexDB Benchmark");
-
     let db_path = PathBuf::from("ethrex_bench.edb");
     let _ = fs::remove_file(&db_path);
 
     let mut db = EthrexDB::new(db_path.clone())?;
     let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
-    // Write performance test - batch processing like Ethereum blocks
-    let batch_size = 15_000; // ~Ethereum block size
+    let batch_size = 15_000;
     let batches: Vec<_> = accounts.chunks(batch_size).collect();
-    
-    println!("  📝 Processing {} accounts in {} batches of ~{}", 
-             accounts.len(), batches.len(), batch_size);
-    
+
     let total_write_start = Instant::now();
-    
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let batch_start = Instant::now();
-        
-        // Insert batch into trie
+
+    for batch in batches.iter() {
         for (key, value) in batch.iter() {
             trie.insert(key.clone(), value.clone())?;
         }
-        
-        // Commit batch (like block commit)
-        let root_node = trie.root_node()?.ok_or("No root node")?;
+
+        // Commit db and trie (Convert NodeRef::Node to NodeRef::Hash)
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node)?;
-        trie.commit()?; // Convert to hashes for CoW efficiency
-        
-        let batch_time = batch_start.elapsed();
-        if batch_idx % 10 == 0 || batch_idx == batches.len() - 1 {
-            println!("    Batch {}/{}: {}ms ({} accounts)", 
-                     batch_idx + 1, batches.len(), batch_time.as_millis(), batch.len());
-        }
+        trie.commit()?;
     }
-    
+
     let total_write_time = total_write_start.elapsed();
 
-    // Read performance test
     let read_start = Instant::now();
     let mut _successful_reads = 0;
 
@@ -184,24 +167,14 @@ fn run_ethrex_benchmark(
     }
 
     let read_time = read_start.elapsed();
-    let reads_per_sec = sample_keys.len() as f64 / read_time.as_secs_f64();
-
-    println!(
-        "  ✅ Write: {}ms, Read: {}ms ({:.0} reads/sec)",
-        total_write_time.as_millis(),
-        read_time.as_millis(),
-        reads_per_sec
-    );
 
     // Cleanup
     let _ = fs::remove_file(&db_path);
 
     Ok(BenchmarkResults {
-        db_name: "EthrexDB".to_string(),
         total_accounts: accounts.len(),
         write_time_ms: total_write_time.as_millis() as u64,
         read_time_ms: read_time.as_millis() as u64,
-        reads_per_sec,
     })
 }
 
@@ -209,38 +182,28 @@ fn run_libmdbx_benchmark(
     accounts: &[(Vec<u8>, Vec<u8>)],
     sample_keys: &[Vec<u8>],
 ) -> Result<BenchmarkResults, Box<dyn std::error::Error>> {
-    println!("🔥 LibMDBX Hash Benchmark");
+    // LibMDBX needs a directory path, it will create the database files inside
+    let libmdbx_dir = PathBuf::from("libmdbx_bench_dir");
+    let _ = fs::remove_dir_all(&libmdbx_dir);
+    fs::create_dir_all(&libmdbx_dir)?;
 
-    let db: LibmdbxTrieDB<TestNodes> = LibmdbxTrieDB::new(new_db::<TestNodes>());
+    let db: LibmdbxTrieDB<TestNodes> =
+        LibmdbxTrieDB::new(new_db_with_path::<TestNodes>(libmdbx_dir.clone()));
     let mut trie = Trie::new(Box::new(db));
 
-    // Write performance test - batch processing like Ethereum blocks
-    let batch_size = 15_000; // ~Ethereum block size
+    let batch_size = 15_000;
     let batches: Vec<_> = accounts.chunks(batch_size).collect();
-    
-    println!("  📝 Processing {} accounts in {} batches of ~{}", 
-             accounts.len(), batches.len(), batch_size);
-    
+
     let total_write_start = Instant::now();
-    
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let batch_start = Instant::now();
-        
-        // Insert batch into trie
+
+    for batch in batches.iter() {
         for (key, value) in batch.iter() {
             trie.insert(key.clone(), value.clone())?;
         }
-        
-        // Commit batch (like block commit)
+
         trie.commit()?;
-        
-        let batch_time = batch_start.elapsed();
-        if batch_idx % 10 == 0 || batch_idx == batches.len() - 1 {
-            println!("    Batch {}/{}: {}ms ({} accounts)", 
-                     batch_idx + 1, batches.len(), batch_time.as_millis(), batch.len());
-        }
     }
-    
+
     let total_write_time = total_write_start.elapsed();
 
     // Read performance test
@@ -254,59 +217,46 @@ fn run_libmdbx_benchmark(
     }
 
     let read_time = read_start.elapsed();
-    let reads_per_sec = sample_keys.len() as f64 / read_time.as_secs_f64();
 
-    println!(
-        "  ✅ Write: {}ms, Read: {}ms ({:.0} reads/sec)",
-        total_write_time.as_millis(),
-        read_time.as_millis(),
-        reads_per_sec
-    );
+    // Cleanup
+    let _ = fs::remove_dir_all(&libmdbx_dir);
 
     Ok(BenchmarkResults {
-        db_name: "LibMDBX Hash".to_string(),
         total_accounts: accounts.len(),
         write_time_ms: total_write_time.as_millis() as u64,
         read_time_ms: read_time.as_millis() as u64,
-        reads_per_sec,
     })
 }
 
-fn print_comparison_table(results: &[BenchmarkResults]) {
-    println!("\n📊 COMPARISON TABLE");
-    println!("=====================================================================================");
-    println!("Database        Accounts    Write Time    Read Time    Reads/Sec    Read Sample");
-    println!("---------       --------    ----------    ---------    ---------    -----------");
+fn print_scale_summary(results: &[BenchmarkResults], sample_size: usize, batch_count: usize) {
+    let ethrex_result = &results[0];
+    let libmdbx_result = &results[1];
 
-    for result in results {
-        println!(
-            "{:<14}  {:>8}    {:>8}ms    {:>7}ms    {:>9.0}    {:>8} keys",
-            result.db_name,
-            result.total_accounts,
-            result.write_time_ms,
-            result.read_time_ms,
-            result.reads_per_sec,
-            if result.total_accounts >= 100 {
-                result.total_accounts / 100
-            } else {
-                result.total_accounts / 10
-            }
-        );
-    }
-    println!("=====================================================================================");
+    let ethrex_avg_batch = ethrex_result.write_time_ms as f64 / batch_count as f64;
+    let libmdbx_avg_batch = libmdbx_result.write_time_ms as f64 / batch_count as f64;
+
+    println!(
+        "\n{} accounts ({} batches):",
+        ethrex_result.total_accounts, batch_count
+    );
+    println!(
+        "  EthrexDB: {:.0}ms avg/batch, {}ms total write, {}ms read ({} keys)",
+        ethrex_avg_batch, ethrex_result.write_time_ms, ethrex_result.read_time_ms, sample_size
+    );
+    println!(
+        "  LibMDBX:  {:.0}ms avg/batch, {}ms total write, {}ms read ({} keys)",
+        libmdbx_avg_batch, libmdbx_result.write_time_ms, libmdbx_result.read_time_ms, sample_size
+    );
 }
 
-fn run_scale_benchmark(
+fn run_benchmark(
     total_accounts: usize,
 ) -> Result<Vec<BenchmarkResults>, Box<dyn std::error::Error>> {
-    println!("\n🔥 Scale: {} accounts", total_accounts);
+    println!("\nBenchmark: {} accounts", total_accounts);
     println!("========================");
 
     let mut results = Vec::new();
 
-    // Generate all account data upfront (like mainnet snapshot)
-    println!("Generating {} account hashes...", total_accounts);
-    let gen_start = Instant::now();
     let mut accounts: Vec<(Vec<u8>, Vec<u8>)> = (0..total_accounts)
         .map(|id| {
             let key = generate_account_hash(id as u64);
@@ -314,9 +264,7 @@ fn run_scale_benchmark(
             (key, value)
         })
         .collect();
-    println!("✅ Generated in {:.2}s", gen_start.elapsed().as_secs_f64());
 
-    // Shuffle for random distribution (like real accounts)
     let mut rng = thread_rng();
     accounts.shuffle(&mut rng);
 
@@ -330,42 +278,73 @@ fn run_scale_benchmark(
         .collect();
 
     println!(
-        "📊 Running benchmarks with {} read samples (1% of total)...",
+        "Running benchmarks with {} read samples (1% of total)...",
         sample_keys.len()
     );
 
-    // Benchmark 1: EthrexDB
     results.push(run_ethrex_benchmark(&accounts, &sample_keys)?);
-
-    // Benchmark 2: LibMDBX Hash (Trie)
     results.push(run_libmdbx_benchmark(&accounts, &sample_keys)?);
 
-    // Print comparison table
-    print_comparison_table(&results);
+    let batch_count = accounts.len().div_ceil(15_000);
+    print_scale_summary(&results, sample_keys.len(), batch_count);
 
     Ok(results)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 EthrexDB vs LibMDBX Mainnet Benchmark");
-    println!("========================================");
-    println!("Simulating Ethereum account storage patterns");
-    println!("Comparing EthrexDB vs LibMDBX Hash (Trie) performance");
+fn print_final_comparison(all_results: &[BenchmarkResults], read_samples: &[usize]) {
+    println!("\n\nFINAL COMPARISON");
+    println!("=================");
+    println!(
+        "Scale     EthrexDB Write    LibMDBX Write    EthrexDB Read    LibMDBX Read    Keys Read"
+    );
+    println!(
+        "------    -------------    -------------    -------------    ------------    ---------"
+    );
 
-    // Multiple scales with more reads (1% sample = 10x more reads than before)
-    let scales = [10_000, 100_000, 500_000, 1_000_000, 10_000_000];
+    for (i, chunk) in all_results.chunks(2).enumerate() {
+        if chunk.len() == 2 {
+            let ethrex = &chunk[0];
+            let libmdbx = &chunk[1];
+
+            let scale_str = if ethrex.total_accounts >= 1_000_000 {
+                format!("{}M", ethrex.total_accounts / 1_000_000)
+            } else if ethrex.total_accounts >= 1_000 {
+                format!("{}k", ethrex.total_accounts / 1_000)
+            } else {
+                ethrex.total_accounts.to_string()
+            };
+
+            let keys_read = read_samples[i];
+
+            println!(
+                "{:<8}  {:>11}ms    {:>11}ms    {:>11}ms    {:>10}ms    {:>9}",
+                scale_str,
+                ethrex.write_time_ms,
+                libmdbx.write_time_ms,
+                ethrex.read_time_ms,
+                libmdbx.read_time_ms,
+                keys_read
+            );
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("ETHREXDB VS LIBMDBX");
+    println!("===================");
+
+    let scales = [10_000, 100_000, 500_000, 1_000_000];
     let mut all_results = Vec::new();
+    let mut read_samples = Vec::new();
 
     for &scale in &scales {
-        let results = run_scale_benchmark(scale)?;
+        let sample_size = (scale / 100).clamp(1000, 50_000);
+        read_samples.push(sample_size);
+        let results = run_benchmark(scale)?;
         all_results.extend(results);
     }
 
-    println!("\n🎯 FINAL SUMMARY");
-    println!("=================");
-    println!("All benchmarks completed with 1% random read samples (10x more reads than before)");
-    println!("EthrexDB: mmap + CoW trie with pure HashMap index");
-    println!("LibMDBX:  LMDB-based persistent trie storage");
+    print_final_comparison(&all_results, &read_samples);
 
     Ok(())
 }
