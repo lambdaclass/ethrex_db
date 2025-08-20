@@ -320,6 +320,7 @@ impl<'a> Deserializer<'a> {
         self.get_by_path_inner(nibbles, offset)
     }
 
+    /// Internal helper for get_by_path with position tracking
     fn get_by_path_inner(
         &self,
         mut path: Nibbles,
@@ -358,9 +359,15 @@ impl<'a> Deserializer<'a> {
                 let node_offset =
                     u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
                 position += 8;
+
+                // Read value offset
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
                 let value_offset =
                     u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
 
+                // Extend has only a child or a value
                 if node_offset == 0 && value_offset > 0 {
                     // Leaf node
                     let leaf_path_without_flag = if nibbles.is_leaf() {
@@ -379,6 +386,7 @@ impl<'a> Deserializer<'a> {
                     if !path.skip_prefix(&nibbles) {
                         return Ok(None);
                     }
+                    // Recurse into the child
                     self.get_by_path_inner(path, node_offset as usize)
                 } else {
                     Ok(None)
@@ -436,7 +444,6 @@ impl<'a> Deserializer<'a> {
         let len = u32::from_le_bytes(self.buffer[offset..offset + 4].try_into().unwrap()) as usize;
 
         let data_start = offset + 4;
-
         if data_start + len > self.buffer.len() {
             return Ok(None);
         }
@@ -473,6 +480,8 @@ mod tests {
     /// Offset to skip the prepended previous root offset (8 bytes)
     const ROOT_DATA_OFFSET: usize = 8;
 
+    /// Helper function to create [`Index`] and [`Serializer`] structures
+    /// and serialize a tree
     fn serialize(root: &Node) -> (Vec<u8>, HashMap<NodeHash, u64>, u64) {
         let index = Index::new();
         let serializer = Serializer::new(&index, 0);
@@ -506,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_leaf() {
+    fn test_serialize_deserialize_leaf_with_long_path() {
         let leaf = Node::Leaf(LeafNode {
             partial: Nibbles::from_hex(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5]),
             value: b"long_path_value".to_vec(),

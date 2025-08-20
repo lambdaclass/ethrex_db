@@ -1,4 +1,8 @@
 //! Simple in-memory index: [`NodeHash`] -> offset lookups
+//!
+//! This is used to store the absolute offset of the node in the file
+//! for each node hash. With this information, we can create new nodes and be able
+//! to point to nodes that didn't change and exist in the file.
 
 use crate::trie::NodeHash;
 use std::collections::HashMap;
