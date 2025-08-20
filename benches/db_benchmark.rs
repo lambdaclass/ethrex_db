@@ -127,6 +127,7 @@ struct BenchmarkResults {
     total_accounts: usize,
     write_time_ms: u64,
     read_time_ms: u64,
+    root_hash: NodeHash,
 }
 
 fn run_ethrex_benchmark(
@@ -168,6 +169,9 @@ fn run_ethrex_benchmark(
 
     let read_time = read_start.elapsed();
 
+    // Get root hash for validation
+    let root_hash = db.root().unwrap().compute_hash();
+
     // Cleanup
     let _ = fs::remove_file(&db_path);
 
@@ -175,6 +179,7 @@ fn run_ethrex_benchmark(
         total_accounts: accounts.len(),
         write_time_ms: total_write_time.as_millis() as u64,
         read_time_ms: read_time.as_millis() as u64,
+        root_hash,
     })
 }
 
@@ -218,6 +223,9 @@ fn run_libmdbx_benchmark(
 
     let read_time = read_start.elapsed();
 
+    // Get root hash for validation
+    let root_hash = trie.root_node().unwrap().unwrap().compute_hash();
+
     // Cleanup
     let _ = fs::remove_dir_all(&libmdbx_dir);
 
@@ -225,6 +233,7 @@ fn run_libmdbx_benchmark(
         total_accounts: accounts.len(),
         write_time_ms: total_write_time.as_millis() as u64,
         read_time_ms: read_time.as_millis() as u64,
+        root_hash,
     })
 }
 
@@ -246,6 +255,12 @@ fn print_scale_summary(results: &[BenchmarkResults], sample_size: usize, batch_c
     println!(
         "  LibMDBX:  {:.0}ms avg/batch, {}ms total write, {}ms read ({} keys)",
         libmdbx_avg_batch, libmdbx_result.write_time_ms, libmdbx_result.read_time_ms, sample_size
+    );
+
+    // Validate root hashes match
+    assert_eq!(
+        ethrex_result.root_hash, libmdbx_result.root_hash,
+        "Root hashes mismatch"
     );
 }
 
