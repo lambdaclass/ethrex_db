@@ -31,7 +31,8 @@ use std::path::PathBuf;
 pub struct FileManager {
     /// File where the data is stored
     file: File,
-    /// Memory-mapped view of the file
+    /// Memory-mapped of the file
+    /// TODO: Handle case when adding new nodes
     mmap: Mmap,
 }
 

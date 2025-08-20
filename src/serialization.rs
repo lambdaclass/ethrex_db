@@ -47,6 +47,7 @@
 
 use crate::index::Index;
 use std::collections::HashMap;
+use std::ops::Not;
 use std::sync::{Arc, OnceLock};
 
 use crate::trie::{
@@ -107,10 +108,6 @@ impl<'a> Serializer<'a> {
 
         if let Some(existing_offset) = self.node_index.get(&hash) {
             return Ok(existing_offset);
-        }
-
-        if let Some(&absolute_offset) = self.new_nodes.get(&hash) {
-            return Ok(absolute_offset);
         }
 
         // Node is new, serialize it
@@ -181,14 +178,17 @@ impl<'a> Serializer<'a> {
             child_offsets[i] = self.serialize_noderef(child)?;
         }
 
-        // Serialize value
-        let value_offset = if branch.value.is_empty() {
-            0u64
-        } else {
-            let offset = self.base_offset + self.buffer.len() as u64;
-            self.write_bytes_with_len(&branch.value);
-            offset
-        };
+        // Serialize offset
+        let value_offset = branch
+            .value
+            .is_empty()
+            .not()
+            .then(|| {
+                let offset = self.base_offset + self.buffer.len() as u64;
+                self.write_bytes_with_len(&branch.value);
+                offset
+            })
+            .unwrap_or_default();
 
         // Write all offsets
         let mut pos = offsets_start;
@@ -203,6 +203,7 @@ impl<'a> Serializer<'a> {
 
     fn serialize_noderef(&mut self, noderef: &NodeRef) -> Result<u64, TrieError> {
         match noderef {
+            NodeRef::Node(node, _) => self.serialize_node(node),
             NodeRef::Hash(hash) if hash.is_valid() => {
                 // Node was previously committed - must exist in index
                 self.node_index
@@ -210,7 +211,6 @@ impl<'a> Serializer<'a> {
                     .ok_or_else(|| panic!("Hash reference not found: {:?}", hash))
             }
             NodeRef::Hash(_) => Ok(0), // Empty/invalid hash
-            NodeRef::Node(node, _) => self.serialize_node(node),
         }
     }
 
@@ -222,11 +222,16 @@ impl<'a> Serializer<'a> {
 }
 
 /// Deserializes a Merkle Patricia Trie from a byte buffer.
+///
+/// The deserializer reads the binary format produced by [`Serializer`].
+/// It uses the two node format and converts back to the standard three node format.
 pub struct Deserializer<'a> {
+    /// The byte buffer containing serialized trie data
     buffer: &'a [u8],
 }
 
 impl<'a> Deserializer<'a> {
+    /// Creates a new deserializer for the given buffer
     pub fn new(buffer: &'a [u8]) -> Self {
         Self { buffer }
     }
@@ -329,15 +334,27 @@ impl<'a> Deserializer<'a> {
 
         match tag {
             TAG_EXTEND => {
+                // Read nibbles length
+                if position + 4 > self.buffer.len() {
+                    return Ok(None);
+                }
                 let len =
                     u32::from_le_bytes(self.buffer[position..position + 4].try_into().unwrap())
                         as usize;
                 position += 4;
 
+                // Read nibbles data
+                if position + len > self.buffer.len() {
+                    return Ok(None);
+                }
                 let compact_nibbles = &self.buffer[position..position + len];
                 let nibbles = Nibbles::decode_compact(compact_nibbles);
                 position += len;
 
+                // Read node offset
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
                 let node_offset =
                     u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
                 position += 8;
@@ -346,13 +363,13 @@ impl<'a> Deserializer<'a> {
 
                 if node_offset == 0 && value_offset > 0 {
                     // Leaf node
-                    let leaf_path = if nibbles.is_leaf() {
+                    let leaf_path_without_flag = if nibbles.is_leaf() {
                         nibbles.slice(0, nibbles.len() - 1)
                     } else {
                         nibbles
                     };
 
-                    if path == leaf_path {
+                    if path == leaf_path_without_flag {
                         self.read_value_at_offset(value_offset as usize)
                     } else {
                         Ok(None)
@@ -374,14 +391,25 @@ impl<'a> Deserializer<'a> {
                     let value_offset =
                         u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
 
+                    if position + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
                     if value_offset > 0 {
                         self.read_value_at_offset(value_offset as usize)
                     } else {
                         Ok(None)
                     }
                 } else {
-                    let next_nibble = path.next_choice().unwrap();
+                    let Some(next_nibble) = path.next_choice() else {
+                        return Ok(None);
+                    };
+
+                    // Read child offset at position next_nibble
                     let child_offset_pos = position + next_nibble * 8;
+                    if child_offset_pos + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
+
                     let child_offset = u64::from_le_bytes(
                         self.buffer[child_offset_pos..child_offset_pos + 8]
                             .try_into()
@@ -399,34 +427,37 @@ impl<'a> Deserializer<'a> {
         }
     }
 
+    /// Read value at specific offset
     fn read_value_at_offset(&self, offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
         if offset + 4 > self.buffer.len() {
             return Ok(None);
         }
 
         let len = u32::from_le_bytes(self.buffer[offset..offset + 4].try_into().unwrap()) as usize;
+
         let data_start = offset + 4;
 
         if data_start + len > self.buffer.len() {
             return Ok(None);
         }
 
-        let value = self.buffer[data_start..data_start + len].to_vec();
-        Ok(Some(value))
+        Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
     }
 
+    /// Read a u64 value from buffer at position
     fn read_u64_at(&self, pos: usize) -> Result<u64, TrieError> {
         if pos + 8 > self.buffer.len() {
-            panic!("Invalid buffer length");
+            panic!("Invalid buffer length for u64");
         }
         Ok(u64::from_le_bytes(
             self.buffer[pos..pos + 8].try_into().unwrap(),
         ))
     }
 
+    /// Read a u32 value from buffer at position  
     fn read_u32_at(&self, pos: usize) -> Result<u32, TrieError> {
         if pos + 4 > self.buffer.len() {
-            panic!("Invalid buffer length");
+            panic!("Invalid buffer length for u32");
         }
         Ok(u32::from_le_bytes(
             self.buffer[pos..pos + 4].try_into().unwrap(),
@@ -442,6 +473,12 @@ mod tests {
     /// Offset to skip the prepended previous root offset (8 bytes)
     const ROOT_DATA_OFFSET: usize = 8;
 
+    fn serialize(root: &Node) -> (Vec<u8>, HashMap<NodeHash, u64>, u64) {
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
+        serializer.serialize_tree(root, 0).unwrap()
+    }
+
     fn new_temp() -> Trie {
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -454,15 +491,28 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_deserialize_empty_leaf() {
+        let leaf = Node::Leaf(LeafNode {
+            partial: Nibbles::from_hex(vec![]),
+            value: vec![],
+        });
+
+        let (buffer, _, _) = serialize(&leaf);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
+        assert_eq!(leaf, recovered);
+    }
+
+    #[test]
     fn test_serialize_leaf() {
         let leaf = Node::Leaf(LeafNode {
             partial: Nibbles::from_hex(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5]),
             value: b"long_path_value".to_vec(),
         });
 
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&leaf, 0).unwrap();
+        let (buffer, _, _) = serialize(&leaf);
 
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -477,9 +527,7 @@ mod tests {
             value: vec![],
         }));
 
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&branch, 0).unwrap();
+        let (buffer, _, _) = serialize(&branch);
 
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -499,9 +547,7 @@ mod tests {
             child: NodeRef::Node(Arc::new(leaf), OnceLock::new()),
         });
 
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&ext, 0).unwrap();
+        let (buffer, _, _) = serialize(&ext);
 
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -550,9 +596,7 @@ mod tests {
             child: NodeRef::Node(Arc::new(branch), OnceLock::new()),
         });
 
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&outer_ext, 0).unwrap();
+        let (buffer, _, _) = serialize(&outer_ext);
 
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
@@ -573,9 +617,7 @@ mod tests {
         trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
@@ -598,9 +640,7 @@ mod tests {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
         let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
@@ -618,9 +658,7 @@ mod tests {
 
         // Serialize to file
         let root = trie.root_node().unwrap().unwrap();
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
 
         let path = "/tmp/test_trie.mpt";
         fs::write(path, &buffer).unwrap();
@@ -640,9 +678,7 @@ mod tests {
         trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
@@ -673,9 +709,7 @@ mod tests {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
@@ -764,9 +798,7 @@ mod tests {
 
         let root = trie.root_node().unwrap().unwrap();
 
-        let index = Index::new();
-        let serializer = Serializer::new(&index, 0);
-        let (buffer, _, _) = serializer.serialize_tree(&root, 0).unwrap();
+        let (buffer, _, _) = serialize(&root);
 
         for (key, expected_value) in &test_data {
             let deserializer = Deserializer::new(&buffer);
