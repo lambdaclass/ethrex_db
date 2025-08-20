@@ -205,9 +205,9 @@ impl<'a> Serializer<'a> {
         match noderef {
             NodeRef::Hash(hash) if hash.is_valid() => {
                 // Node was previously committed - must exist in index
-                self.node_index.get(hash).ok_or_else(|| {
-                    TrieError::Other(format!("Hash reference not found: {:?}", hash))
-                })
+                self.node_index
+                    .get(hash)
+                    .ok_or_else(|| panic!("Hash reference not found: {:?}", hash))
             }
             NodeRef::Hash(_) => Ok(0), // Empty/invalid hash
             NodeRef::Node(node, _) => self.serialize_node(node),
@@ -234,7 +234,7 @@ impl<'a> Deserializer<'a> {
     /// Decodes a node at specific position
     pub fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
         if pos >= self.buffer.len() {
-            return Err(TrieError::Other("Invalid buffer position".to_string()));
+            panic!("Invalid buffer position");
         }
 
         let tag = self.buffer[pos];
@@ -269,7 +269,7 @@ impl<'a> Deserializer<'a> {
                             NodeRef::Node(Arc::new(child), OnceLock::new()),
                         )))
                     }
-                    _ => Err(TrieError::Other("Invalid Extend node".to_string())),
+                    _ => panic!("Invalid Extend node with both child and value"),
                 }
             }
             TAG_BRANCH => {
@@ -302,7 +302,7 @@ impl<'a> Deserializer<'a> {
                     children, value,
                 ))))
             }
-            _ => Err(TrieError::Other(format!("Invalid node tag: {}", tag))),
+            _ => panic!("Invalid node tag: {tag}"),
         }
     }
 
@@ -380,9 +380,7 @@ impl<'a> Deserializer<'a> {
                         Ok(None)
                     }
                 } else {
-                    let next_nibble = path
-                        .next_choice()
-                        .ok_or_else(|| TrieError::Other("Invalid path".to_string()))?;
+                    let next_nibble = path.next_choice().unwrap();
                     let child_offset_pos = position + next_nibble * 8;
                     let child_offset = u64::from_le_bytes(
                         self.buffer[child_offset_pos..child_offset_pos + 8]
@@ -397,7 +395,7 @@ impl<'a> Deserializer<'a> {
                     }
                 }
             }
-            _ => Err(TrieError::Other(format!("Invalid node tag: {}", tag))),
+            _ => panic!("Invalid node tag: {tag}"),
         }
     }
 
@@ -419,7 +417,7 @@ impl<'a> Deserializer<'a> {
 
     fn read_u64_at(&self, pos: usize) -> Result<u64, TrieError> {
         if pos + 8 > self.buffer.len() {
-            return Err(TrieError::Other("Invalid buffer length".to_string()));
+            panic!("Invalid buffer length");
         }
         Ok(u64::from_le_bytes(
             self.buffer[pos..pos + 8].try_into().unwrap(),
@@ -428,7 +426,7 @@ impl<'a> Deserializer<'a> {
 
     fn read_u32_at(&self, pos: usize) -> Result<u32, TrieError> {
         if pos + 4 > self.buffer.len() {
-            return Err(TrieError::Other("Invalid buffer length".to_string()));
+            panic!("Invalid buffer length");
         }
         Ok(u32::from_le_bytes(
             self.buffer[pos..pos + 4].try_into().unwrap(),

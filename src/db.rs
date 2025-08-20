@@ -71,7 +71,7 @@ impl EthrexDB {
     pub fn root(&self) -> Result<Node, TrieError> {
         let latest_offset = self.file_manager.read_latest_root_offset()?;
         if latest_offset == 0 {
-            return Err(TrieError::Other("No root node in database".to_string()));
+            panic!("No root node in database");
         }
 
         let file_data = self.file_manager.get_slice_to_end(0)?;
