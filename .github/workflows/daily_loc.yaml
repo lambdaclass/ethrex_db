@@ -37,23 +37,25 @@ jobs:
 
       - name: Generate the loc report
         run: |
-          cd tooling && make loc
+          cd tooling && make loc-detailed
 
       - name: Save new loc_report.json to cache
         if: success()
         uses: actions/cache@v4
         with:
-          path: tooling/loc_report.json
+          path: tooling/current_detailed_loc_report.json
           key: loc-report-${{ github.ref_name }}
 
       - name: Post results in summary
         run: |
           echo "# EthrexDB Lines of Code Report" >> $GITHUB_STEP_SUMMARY
-          cat tooling/loc_report_github.txt >> $GITHUB_STEP_SUMMARY
+          cat tooling/loc_report_detailed.md >> $GITHUB_STEP_SUMMARY
 
       - name: Post results to Slack
         if: always()
         run: |
           if [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
-            sh .github/scripts/publish_loc.sh "${{ secrets.SLACK_WEBHOOK }}"
+            curl -X POST -H 'Content-type: application/json' \
+              --data @tooling/loc_report_slack_detailed.txt \
+              "${{ secrets.SLACK_WEBHOOK }}"
           fi

@@ -24,11 +24,6 @@ target/
 profile.json.gz
 
 # LOC tooling generated files
-tooling/loc_detailed_report.json
-tooling/loc_report_github.txt
-tooling/loc_report.json
-tooling/slack_message.json
-tooling/current_detailed_loc_report.json
-tooling/previous_detailed_loc_report.json
-tooling/detailed_loc_report.txt
-tooling/loc_report_slack.txt
+tooling/*.json
+tooling/*.md
+tooling/*.txt

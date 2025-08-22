@@ -72,7 +72,7 @@ jobs:
         # This creates current_detailed_loc_report.json
 
       - name: Compare Detailed Lines of Code Count
-        run: cd tooling && make loc-compare-detailed
+        run: cd tooling && make loc-detailed-compare
         # This reads current_detailed_loc_report.json and previous_detailed_loc_report.json
         # and outputs detailed_loc_report.txt
 
