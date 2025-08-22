@@ -4,8 +4,8 @@ use std::path::Path;
 
 use clap::Parser;
 use report::{
-    LinesOfCodeReport, LinesOfCodeReporterOptions, github_step_summary, pr_message, shell_summary,
-    slack_message,
+    LinesOfCodeReport, LinesOfCodeReporterOptions, markdown_detailed_report, pr_message,
+    shell_summary, slack_detailed_message,
 };
 use spinoff::{Color, Spinner, spinners::Dots};
 use tokei::{Config, LanguageType, Languages};
@@ -25,8 +25,11 @@ fn count_lines_of_code() -> (usize, HashMap<String, usize>) {
         for report in &rust.reports {
             let file_path = report.name.to_string_lossy().to_string();
             if let Some(relative_path) = file_path.strip_prefix("../src/") {
-                // Exclude files in ethrex/ subdirectory
-                if !relative_path.starts_with("ethrex/") {
+                // Exclude subdirectories in src/
+                // Right now, we only count files in the root of src/
+                // since the subdirectories are copied from the ethrex repo
+                // and we don't know if we will be using them in the future
+                if !relative_path.contains("/") {
                     total_loc += report.stats.code;
                     detailed_files.insert(relative_path.to_string(), report.stats.code);
                 }
@@ -53,24 +56,7 @@ fn main() {
         detailed_files: detailed_files.clone(),
     };
 
-    if opts.detailed {
-        fs::write(
-            "current_detailed_loc_report.json",
-            serde_json::to_string(&detailed_files).unwrap(),
-        )
-        .expect("current_detailed_loc_report.json could not be written");
-
-        spinner.success("Detailed report generated!");
-        println!("{}", shell_summary(new_report));
-        println!("\nDetailed breakdown:");
-        
-        let mut files: Vec<_> = detailed_files.iter().collect();
-        files.sort_by_key(|(name, _)| *name);
-        
-        for (file_name, loc) in files {
-            println!("  {}: {} lines", file_name, loc);
-        }
-    } else if opts.compare_detailed {
+    if opts.compare {
         let current_detailed_loc_report = detailed_files;
 
         let previous_detailed_loc_report: HashMap<String, usize> =
@@ -85,33 +71,36 @@ fn main() {
         .unwrap();
 
         spinner.success("Comparison report generated!");
-    } else if opts.summary {
-        spinner.success("Report generated!");
-        println!("{}", shell_summary(new_report));
     } else {
-        // Default behavior - save all reports
         fs::write(
-            "loc_report.json",
-            serde_json::to_string(&new_report).unwrap(),
+            "current_detailed_loc_report.json",
+            serde_json::to_string(&detailed_files).unwrap(),
         )
-        .expect("loc_report.json could not be written");
+        .expect("current_detailed_loc_report.json could not be written");
 
-        let old_report: LinesOfCodeReport = fs::read_to_string("loc_report.json.old")
-            .map(|s| serde_json::from_str(&s).unwrap())
-            .unwrap_or(new_report.clone());
-
+        // Generate markdown report
         fs::write(
-            "loc_report_slack.txt",
-            slack_message(old_report.clone(), new_report.clone()),
+            "loc_report_detailed.md",
+            markdown_detailed_report(&detailed_files),
         )
-        .unwrap();
-        fs::write(
-            "loc_report_github.txt",
-            github_step_summary(old_report, new_report.clone()),
-        )
-        .unwrap();
+        .expect("loc_report_detailed.md could not be written");
 
-        spinner.success("Report generated!");
+        // Generate Slack detailed report
+        fs::write(
+            "loc_report_slack_detailed.txt",
+            slack_detailed_message(&detailed_files),
+        )
+        .expect("loc_report_slack_detailed.txt could not be written");
+
+        spinner.success("Detailed report generated!");
         println!("{}", shell_summary(new_report));
+        println!("\nDetailed breakdown:");
+
+        let mut files: Vec<_> = detailed_files.iter().collect();
+        files.sort_by_key(|(name, _)| *name);
+
+        for (file_name, loc) in files {
+            println!("  {}: {} lines", file_name, loc);
+        }
     }
 }

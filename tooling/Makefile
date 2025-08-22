@@ -1,17 +1,7 @@
-.PHONY: loc loc-stats loc-detailed loc-compare-detailed
+.PHONY: loc-detailed loc-detailed-compare
 
 loc:
 	cargo run
 
-loc-stats:
-	if [ "$(QUIET)" = "true" ]; then \
-		cargo run --quiet -- --summary;\
-	else \
-		cargo run -- --summary;\
-	fi
-
-loc-detailed:
-	cargo run -- --detailed
-
-loc-compare-detailed:
-	cargo run -- --compare-detailed
+loc-compare:
+	cargo run -- --compare

@@ -6,12 +6,8 @@ use std::collections::HashMap;
 
 #[derive(Parser)]
 pub struct LinesOfCodeReporterOptions {
-    #[arg(short, long, value_name = "SUMMARY", default_value = "false")]
-    pub summary: bool,
-    #[arg(short, long, value_name = "DETAILED", default_value = "false")]
-    pub detailed: bool,
-    #[arg(short, long, value_name = "PR_SUMMARY", default_value = "false")]
-    pub compare_detailed: bool,
+    #[arg(short, long, help = "Compare detailed reports for PR comments")]
+    pub compare: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -159,6 +155,59 @@ pub fn slack_message(old_report: LinesOfCodeReport, new_report: LinesOfCodeRepor
             std::cmp::Ordering::Equal => "".to_string(),
         }
     )
+}
+
+pub fn slack_detailed_message(detailed_files: &HashMap<String, usize>) -> String {
+    let total_loc: usize = detailed_files.values().sum();
+    
+    let mut files: Vec<_> = detailed_files.iter().collect();
+    files.sort_by_key(|(name, _)| *name);
+    
+    let mut detailed_text = format!("*Total: {} lines*\n\n", total_loc);
+    
+    for (file_name, loc) in files {
+        detailed_text.push_str(&format!("• `{}`: {} lines\n", file_name, loc));
+    }
+
+    format!(
+        r#"{{
+    "blocks": [
+        {{
+            "type": "header",
+            "text": {{
+                "type": "plain_text",
+                "text": "EthrexDB Detailed Lines of Code Report"
+            }}
+        }},
+        {{
+            "type": "section",
+            "text": {{
+                "type": "mrkdwn",
+                "text": "{}"
+            }}
+        }}
+    ]
+}}"#,
+        detailed_text
+    )
+}
+
+pub fn markdown_detailed_report(detailed_files: &HashMap<String, usize>) -> String {
+    let total_loc: usize = detailed_files.values().sum();
+    
+    let mut files: Vec<_> = detailed_files.iter().collect();
+    files.sort_by_key(|(name, _)| *name);
+    
+    let mut markdown = String::new();
+    markdown.push_str("# EthrexDB Lines of Code Report\n\n");
+    markdown.push_str(&format!("**Total: {} lines**\n\n", total_loc));
+    markdown.push_str("## Files breakdown:\n\n");
+    
+    for (file_name, loc) in files {
+        markdown.push_str(&format!("- `{}`: {} lines\n", file_name, loc));
+    }
+    
+    markdown
 }
 
 pub fn github_step_summary(old_report: LinesOfCodeReport, new_report: LinesOfCodeReport) -> String {
