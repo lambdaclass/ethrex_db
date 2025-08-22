@@ -20,6 +20,7 @@ pub struct EthrexDB {
     /// File manager
     file_manager: FileManager,
     /// Index mapping node hashes to their file offsets
+    /// TODO: Read from file if it exists to
     node_index: Index,
 }
 
@@ -37,6 +38,7 @@ impl EthrexDB {
     /// Open an existing database
     pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
         let file_manager = FileManager::open(file_path.clone())?;
+        // TODO: Read node index from file if it exists
         let node_index = Index::new();
         Ok(Self {
             file_manager,

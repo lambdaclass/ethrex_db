@@ -11,6 +11,8 @@ use std::collections::HashMap;
 #[derive(Debug, Default)]
 pub struct Index {
     /// Index map
+    /// TODO: Use a better data structure
+    /// TODO: Read from file if it exists
     data: HashMap<NodeHash, u64>,
 }
 

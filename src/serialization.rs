@@ -40,10 +40,6 @@
 //! [`Serializer::node_index`]. If the node's hash already exists, its offset is
 //! returned immediately without re-serialization. This means unchanged subtrees
 //! are never duplicated - they're referenced by offset.
-//!
-//! The serialization order is depth-first, with the root always first after the
-//! `prev_root_offset`. This allows offsets to be calculated during serialization
-//! as children are written immediately after their parents (unless they already exist).
 
 use crate::index::Index;
 use std::collections::HashMap;
