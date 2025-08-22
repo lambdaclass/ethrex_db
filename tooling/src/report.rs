@@ -126,45 +126,14 @@ fn pr_message_summary(
     pr_message
 }
 
-pub fn slack_message(old_report: LinesOfCodeReport, new_report: LinesOfCodeReport) -> String {
-    let ethrex_db_diff = new_report.ethrex_db.abs_diff(old_report.ethrex_db);
-
-    format!(
-        r#"{{
-    "blocks": [
-        {{
-            "type": "header",
-            "text": {{
-                "type": "plain_text",
-                "text": "EthrexDB Lines of Code Report"
-            }}
-        }},
-        {{
-            "type": "section",
-            "text": {{
-                "type": "mrkdwn",
-                "text": "*ethrex_db:* {} {}"
-            }}
-        }}
-    ]
-}}"#,
-        new_report.ethrex_db,
-        match new_report.ethrex_db.cmp(&old_report.ethrex_db) {
-            std::cmp::Ordering::Greater => format!("(+{ethrex_db_diff})"),
-            std::cmp::Ordering::Less => format!("(-{ethrex_db_diff})"),
-            std::cmp::Ordering::Equal => "".to_string(),
-        }
-    )
-}
-
 pub fn slack_detailed_message(detailed_files: &HashMap<String, usize>) -> String {
     let total_loc: usize = detailed_files.values().sum();
-    
+
     let mut files: Vec<_> = detailed_files.iter().collect();
     files.sort_by_key(|(name, _)| *name);
-    
+
     let mut detailed_text = format!("*Total: {} lines*\n\n", total_loc);
-    
+
     for (file_name, loc) in files {
         detailed_text.push_str(&format!("• `{}`: {} lines\n", file_name, loc));
     }
@@ -194,38 +163,20 @@ pub fn slack_detailed_message(detailed_files: &HashMap<String, usize>) -> String
 
 pub fn markdown_detailed_report(detailed_files: &HashMap<String, usize>) -> String {
     let total_loc: usize = detailed_files.values().sum();
-    
+
     let mut files: Vec<_> = detailed_files.iter().collect();
     files.sort_by_key(|(name, _)| *name);
-    
+
     let mut markdown = String::new();
     markdown.push_str("# EthrexDB Lines of Code Report\n\n");
     markdown.push_str(&format!("**Total: {} lines**\n\n", total_loc));
     markdown.push_str("## Files breakdown:\n\n");
-    
+
     for (file_name, loc) in files {
         markdown.push_str(&format!("- `{}`: {} lines\n", file_name, loc));
     }
-    
+
     markdown
-}
-
-pub fn github_step_summary(old_report: LinesOfCodeReport, new_report: LinesOfCodeReport) -> String {
-    let ethrex_db_diff = new_report.ethrex_db.abs_diff(old_report.ethrex_db);
-
-    format!(
-        r#"```
-EthrexDB Lines of Code Summary
-==============================
-ethrex_db: {} {}
-```"#,
-        new_report.ethrex_db,
-        match new_report.ethrex_db.cmp(&old_report.ethrex_db) {
-            std::cmp::Ordering::Greater => format!("(+{ethrex_db_diff})"),
-            std::cmp::Ordering::Less => format!("(-{ethrex_db_diff})"),
-            std::cmp::Ordering::Equal => "".to_string(),
-        }
-    )
 }
 
 pub fn shell_summary(new_report: LinesOfCodeReport) -> String {
