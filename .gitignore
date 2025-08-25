@@ -25,3 +25,9 @@ target/
 
 # Samply json
 profile.json.gz
+
+# LOC tooling generated files
+current_detailed_loc_report.json
+detailed_loc_report.txt
+loc_report_detailed.md
+loc_report_slack_detailed.txt
