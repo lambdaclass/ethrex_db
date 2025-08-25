@@ -14,22 +14,32 @@ fn main() {
     let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
     let mut keys = Vec::new();
 
-    for i in 0..1_000_000 {
-        let key = format!("benchmark_key_{:08}", i);
-        let value = format!("value_for_key_{:08}", i);
+    let total_insert_time = Instant::now();
+    println!("Inserting 100,000 keys 10 times");
+    for batch in 0..10 {
+        let start_insert = Instant::now();
+        for i in 0..100_000 {
+            let key = format!("benchmark_key_{:08}", batch * 100_000 + i);
+            let value = format!("value_for_key_{:08}", i);
 
-        trie.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec())
-            .unwrap();
-        keys.push(key);
+            trie.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec())
+                .unwrap();
+            keys.push(key);
+        }
+        let root_node = trie.root_node().unwrap().unwrap();
+        let trie_hash = root_node.compute_hash();
+        let db_hash = db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
+        assert_eq!(trie_hash, db_hash);
+
+        println!(
+            "Insert 100,000 keys in batch {batch}. Time taken: {:?}",
+            start_insert.elapsed()
+        );
     }
+    println!("Total insert time: {:?}", total_insert_time.elapsed());
 
-    // Single commit with all data
-    let start_insert = Instant::now();
-    let root_node = trie.root_node().unwrap().unwrap();
-    db.commit(&root_node).unwrap();
-    println!("Insert phase completed in {:?}", start_insert.elapsed());
-
-    // === PHASE 2: Random gets (this is what we want to profile) ===
+    // === PHASE 2: Random gets ===
     println!("Phase 2: Performing 1,000,000 random gets...");
     let start_gets = Instant::now();
 
