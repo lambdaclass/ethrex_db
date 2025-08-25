@@ -46,7 +46,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Lines of Code Counter for base
-        run: cd tooling && make loc-detailed
+        run: cd tooling && make loc
         # This creates current_detailed_loc_report.json for the base branch
 
       - name: Rename base report to previous_detailed_loc_report.json
@@ -68,7 +68,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Lines of Code Counter for PR
-        run: cd tooling && make loc-detailed
+        run: cd tooling && make loc
         # This creates current_detailed_loc_report.json
 
       - name: Compare Detailed Lines of Code Count
