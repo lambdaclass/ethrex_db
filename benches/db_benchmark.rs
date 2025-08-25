@@ -238,12 +238,9 @@ fn run_libmdbx_benchmark(
 
     // Read performance test
     let read_start = Instant::now();
-    let mut _successful_reads = 0;
 
     for key in sample_keys {
-        if trie.get(key)?.is_some() {
-            _successful_reads += 1;
-        }
+        trie.get(key).unwrap().unwrap();
     }
 
     let read_time = read_start.elapsed();
