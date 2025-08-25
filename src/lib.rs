@@ -12,7 +12,3 @@ mod rlp;
 pub mod trie;
 
 pub use db::EthrexDB;
-
-fn testing_loc() {
-    println!("testing_loc");
-}
