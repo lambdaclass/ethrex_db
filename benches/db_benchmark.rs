@@ -8,7 +8,7 @@
 
 use ethrexdb::EthrexDB;
 use ethrexdb::trie::{InMemoryTrieDB, NodeHash, Trie, TrieDB, TrieError};
-use libmdbx::orm::{Database, Table, table_info};
+use libmdbx::orm::{Database, Decodable, Encodable, Table, table_info};
 use libmdbx::table;
 use rand::{seq::SliceRandom, thread_rng};
 use sha3::{Digest, Keccak256};
@@ -17,6 +17,34 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Wrapper for NodeHash to implement external traits in benchmarks
+/// This is needed due to Rust's orphan rule: we can't implement
+/// external traits (Encodable/Decodable from libmdbx) for external types (NodeHash)
+/// With this wrapper, we can move libmdbx dependecy to dev-dependencies and
+/// avoid creating a new feature flag
+#[derive(Clone, Copy)]
+pub struct NodeHashWrapper(NodeHash);
+
+impl From<NodeHash> for NodeHashWrapper {
+    fn from(hash: NodeHash) -> Self {
+        NodeHashWrapper(hash)
+    }
+}
+
+impl Encodable for NodeHashWrapper {
+    type Encoded = Vec<u8>;
+
+    fn encode(self) -> Self::Encoded {
+        self.0.into()
+    }
+}
+
+impl Decodable for NodeHashWrapper {
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        Ok(NodeHashWrapper(NodeHash::from_slice(b)))
+    }
+}
 
 /// Generate realistic 32-byte hash key (like account address)
 fn generate_account_hash(id: u64) -> Vec<u8> {
@@ -57,7 +85,7 @@ fn generate_account_info(id: u64) -> Vec<u8> {
 
 table!(
     /// Test table for benchmarks.
-    (TestNodes) NodeHash => Vec<u8>
+    (TestNodes) NodeHashWrapper => Vec<u8>
 );
 
 /// Create a libmdbx database with a specific path
@@ -86,7 +114,7 @@ pub struct LibmdbxTrieDB<T: Table> {
 
 impl<T> LibmdbxTrieDB<T>
 where
-    T: Table<Key = NodeHash, Value = Vec<u8>>,
+    T: Table<Key = NodeHashWrapper, Value = Vec<u8>>,
 {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
@@ -98,14 +126,14 @@ where
 
 impl<T> TrieDB for LibmdbxTrieDB<T>
 where
-    T: Table<Key = NodeHash, Value = Vec<u8>>,
+    T: Table<Key = NodeHashWrapper, Value = Vec<u8>>,
 {
     fn get(&self, key: NodeHash) -> Result<Option<Vec<u8>>, TrieError> {
         let txn = self
             .db
             .begin_read()
             .map_err(|e| TrieError::DbError(e.to_string()))?;
-        txn.get::<T>(key)
+        txn.get::<T>(key.into())
             .map_err(|e| TrieError::DbError(e.to_string()))
     }
 
@@ -115,7 +143,7 @@ where
             .begin_readwrite()
             .map_err(|e| TrieError::DbError(e.to_string()))?;
         for (key, value) in key_values {
-            txn.upsert::<T>(key, value)
+            txn.upsert::<T>(key.into(), value)
                 .map_err(|e| TrieError::DbError(e.to_string()))?;
         }
         txn.commit().map_err(|e| TrieError::DbError(e.to_string()))

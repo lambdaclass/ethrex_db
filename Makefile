@@ -16,7 +16,7 @@ clean: ## 🧹 Remove build artifacts
 	cargo clean
 
 bench: ## 📊 Run benchmarks
-	cargo bench --bench db_benchmark --features="libmdbx-benchmark"
+	cargo bench --bench db_benchmark
 
 profile: ## 🔍 Run samply profile
 	cargo build --profile release-with-debug --example profiling

@@ -15,21 +15,14 @@ sha3 = "0.10.8"
 thiserror = "2.0.9"
 tinyvec = "1.6.0"
 
-# Optional benchmark dependencies
-libmdbx = { version = "=0.5.3", features = ["orm"], optional = true }
-anyhow = { version = "1.0.86", optional = true }
-
-[features]
-default = []
-libmdbx-benchmark = ["libmdbx", "anyhow"]
-
 [dev-dependencies]
-anyhow = "1.0.86"
+anyhow = { version = "1.0.86" }
 cita_trie = "4.0.0"          # used for proptest comparisons
 criterion = { version = "0.5", features = ["html_reports"] }
 hasher = "0.1.4"             # cita_trie needs this
 hex = "0.4.3"                # for simple benchmark
 hex-literal = "0.4.1"
+libmdbx = { version = "=0.5.3", features = ["orm"] }
 proptest = "1.0.0"
 rand = "0.8.5"
 tempdir = "0.3.7"
@@ -37,7 +30,6 @@ tempdir = "0.3.7"
 [[bench]]
 name = "db_benchmark"
 harness = false
-required-features = ["libmdbx-benchmark"]
 
 [profile.release-with-debug]
 inherits = "release"

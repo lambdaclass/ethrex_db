@@ -1,7 +1,5 @@
 use crate::rlp::{Encoder, RLPDecode, RLPDecodeError, RLPEncode};
 use ethereum_types::H256;
-#[cfg(feature = "libmdbx-benchmark")]
-use libmdbx::orm::{Decodable, Encodable};
 use sha3::{Digest, Keccak256};
 
 /// Struct representing a trie node hash
@@ -138,21 +136,5 @@ impl RLPDecode for NodeHash {
         }
         let hash = NodeHash::from_slice(&hash);
         Ok((hash, rest))
-    }
-}
-
-#[cfg(feature = "libmdbx-benchmark")]
-impl Encodable for NodeHash {
-    type Encoded = Vec<u8>;
-
-    fn encode(self) -> Self::Encoded {
-        self.into()
-    }
-}
-
-#[cfg(feature = "libmdbx-benchmark")]
-impl Decodable for NodeHash {
-    fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        Ok(NodeHash::from_slice(b))
     }
 }
