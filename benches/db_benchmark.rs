@@ -187,12 +187,9 @@ fn run_ethrex_benchmark(
     let total_write_time = total_write_start.elapsed();
 
     let read_start = Instant::now();
-    let mut _successful_reads = 0;
 
     for key in sample_keys {
-        if db.get(key)?.is_some() {
-            _successful_reads += 1;
-        }
+        db.get(key).unwrap().unwrap();
     }
 
     let read_time = read_start.elapsed();
