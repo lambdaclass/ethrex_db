@@ -1,7 +1,7 @@
 [package]
 name = "ethrexdb"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "A simple database implementation based on the Merkle Patricia Trie (MPT)."
 keywords = ["database", "merkle", "patricia", "trie"]
 categories = ["database-implementations"]
@@ -33,3 +33,10 @@ harness = false
 [profile.release-with-debug]
 inherits = "release"
 debug = 2
+
+[workspace]
+members = ["tooling"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
