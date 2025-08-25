@@ -28,20 +28,20 @@ jobs:
         id: cache-loc-report
         uses: actions/cache@v4
         with:
-          path: tooling/loc_report.json
+          path: tooling/current_detailed_loc_report.json
           key: loc-report-${{ github.ref_name }}
           restore-keys: |
             loc-report-
 
-      - name: Rename cached loc_report.json to loc_report.json.old
+      - name: Rename cached current_detailed_loc_report.json to current_detailed_loc_report.json.old
         if: steps.cache-loc-report.outputs.cache-hit != ''
-        run: mv tooling/loc_report.json tooling/loc_report.json.old
+        run: mv tooling/current_detailed_loc_report.json tooling/current_detailed_loc_report.json.old
 
       - name: Generate the loc report
         run: |
           cd tooling && make loc
 
-      - name: Save new loc_report.json to cache
+      - name: Save new current_detailed_loc_report.json to cache
         if: success()
         uses: actions/cache@v4
         with:
