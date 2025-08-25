@@ -483,4 +483,39 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_file_size() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+
+        // Insert 100,000 keys
+        for i in 0..100_000 {
+            let key = format!("key_{}", i);
+            let value = format!("value_{}", i);
+            trie.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec())
+                .unwrap();
+        }
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
+        // Check file size after inserting 100,000 keys
+        let insert_file_size = std::fs::metadata(db_path.clone()).unwrap().len();
+
+        // Update a single key
+        trie.insert(b"key_1".to_vec(), b"updated_value".to_vec())
+            .unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        // Check file size after updating a single key
+        let update_file_size = std::fs::metadata(db_path).unwrap().len();
+
+        // File after update should have a very small increase
+        assert!(insert_file_size < update_file_size);
+        assert!(update_file_size < insert_file_size + 1000);
+    }
 }
