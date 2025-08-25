@@ -1,18 +1,57 @@
-//! Serialization and deserialization of the trie
+//! Serialization and deserialization of the trie.
 //!
-//! Two-node serialization format:
-//! Instead of the standard 3 node types (Branch, Extension, Leaf), we use 2:
-//! - Branch: Has 16 children slots + 1 value slot
-//! - Extend: Has 1 child slot + 1 value slot (can represent both Extension and Leaf)
+//! This module implements a two-node serialization format that reduces the standard
+//! three MPT node types ([`BranchNode`], [`ExtensionNode`], [`LeafNode`]) to just two:
+//! `Branch` and `Extend`.
+//! The `Extend` node cleverly represents both `Extension` and `Leaf` nodes based on which fields are populated.
 //!
-//! This simplifies serialization:
-//! - Leaf -> Extend with value but no child (child_offset = 0)
-//! - Extension -> Extend with child but no value (value_offset = 0)
-//! - Branch -> Branch (unchanged)
+//! File Structure:
+//! Each commit in the file has the following layout:
+//!
+//! ```text
+//! [prev_root_offset: 8 bytes]  // Links to previous root (0 for first commit)
+//! [root_node_data]              // Root node serialized first
+//! [child_nodes_data...]         // Children in depth-first order
+//! ```
+//!
+//! Node Serialization Format:
+//!
+//! Branch Node:
+//! ```text
+//! [tag: 1 byte = 0x00]
+//! [child_offsets: 16 * 8 bytes]  // Offsets to 16 possible children (0 if empty)
+//! [value_offset: 8 bytes]         // Offset to value data (0 if no value)
+//! ```
+//!
+//! Extend Node (Extension or Leaf):
+//! - If the value is empty and the child is not zero, it's an Extension node.
+//! - If the value is not empty and the child is zero, it's a Leaf node.
+//!
+//! ```text
+//! [tag: 1 byte = 0x01]
+//! [nibbles_len: 4 bytes]
+//! [nibbles_data: variable]
+//! [child_offset: 8 bytes]   // 0 for Leaf, valid offset for Extension
+//! [value_offset: 8 bytes]   // Valid offset for Leaf, 0 for Extension
+//! ```
+//!
+//! Copy-on-Write:
+//! During [`Serializer::serialize_tree`], each node is checked against the
+//! [`Serializer::node_index`]. If the node's hash already exists, its offset is
+//! returned immediately without re-serialization. This means unchanged subtrees
+//! are never duplicated - they're referenced by offset.
 
+use crate::index::Index;
+use std::collections::HashMap;
+use std::ops::Not;
 use std::sync::{Arc, OnceLock};
 
-use crate::trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeRef, TrieError};
+use crate::trie::{
+    BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeHash, NodeRef, TrieError,
+};
+
+/// Result type for incremental serialization: (serialized_data, new_node_offsets, root_offset)
+type SerializationResult = Result<(Vec<u8>, HashMap<NodeHash, u64>, u64), TrieError>;
 
 /// Tag for Branch node (16 children + 1 value)
 const TAG_BRANCH: u8 = 0;
@@ -20,126 +59,154 @@ const TAG_BRANCH: u8 = 0;
 const TAG_EXTEND: u8 = 1;
 
 /// Serializes a Merkle Patricia Trie into a byte buffer using the two node format
-///
-/// - Branch: 16 node offsets + 1 value offset
-/// - Extend: 1 node offset + 1 value offset (combines Extension and Leaf)
-#[derive(Default)]
-pub struct Serializer {
-    /// Buffer where serialized data is accumulated
+pub struct Serializer<'a> {
+    /// Buffer to store the serialized data
     buffer: Vec<u8>,
+    /// Index of the nodes in the buffer
+    node_index: &'a Index,
+    /// Serialized nodes in this batch
+    new_nodes: HashMap<NodeHash, u64>,
+    /// Base offset of the buffer
+    base_offset: u64,
 }
 
-impl Serializer {
-    pub fn new() -> Self {
-        Self::default()
+impl<'a> Serializer<'a> {
+    /// Create a new serializer with existing node index
+    pub fn new(node_index: &'a Index, base_offset: u64) -> Self {
+        Self {
+            buffer: Vec::new(),
+            node_index,
+            new_nodes: HashMap::new(),
+            base_offset,
+        }
     }
 
-    /// Serializes a trie using the two node format
-    pub fn serialize_tree(mut self, root: &Node) -> Result<Vec<u8>, TrieError> {
+    /// Serializes a trie, only storing new nodes
+    /// Always prepends the previous root offset (0 for first root)
+    pub fn serialize_tree(mut self, root: &Node, prev_root_offset: u64) -> SerializationResult {
+        // Store where the root structure starts
+        let root_structure_offset = self.base_offset + self.buffer.len() as u64;
+
+        // Always prepend the previous root offset (0 for first root)
+        self.buffer
+            .extend_from_slice(&prev_root_offset.to_le_bytes());
+
+        // Serialize the actual root node
         self.serialize_node(root)?;
-        Ok(self.buffer)
+
+        // Return the offset to the start of the root structure (with prepended offset)
+        Ok((self.buffer, self.new_nodes, root_structure_offset))
     }
 
-    /// Serializes a node, converting from 3 node to 2 node system
+    /// Serializes a node, checking CoW first
     fn serialize_node(&mut self, node: &Node) -> Result<u64, TrieError> {
-        let offset = self.buffer.len() as u64;
+        let hash = node.compute_hash();
+
+        if let Some(existing_offset) = self.node_index.get(&hash) {
+            return Ok(existing_offset);
+        }
+
+        // Node is new, serialize it
+        let buffer_offset = self.buffer.len() as u64;
+        let absolute_offset = self.base_offset + buffer_offset;
+        self.new_nodes.insert(hash, absolute_offset);
 
         match node {
-            Node::Leaf(leaf) => {
-                // Leaf becomes Extend with only value
-                self.buffer.push(TAG_EXTEND);
+            Node::Leaf(leaf) => self.serialize_leaf(leaf)?,
+            Node::Extension(ext) => self.serialize_extension(ext)?,
+            Node::Branch(branch) => self.serialize_branch(branch)?,
+        }
 
-                let compact_nibbles = leaf.partial.encode_compact();
-                self.write_bytes_with_len(&compact_nibbles);
+        Ok(absolute_offset)
+    }
 
-                // Reserve space for offsets
-                let value_offset_pos = self.buffer.len();
-                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // node offset = 0
-                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset placeholder
+    fn serialize_leaf(&mut self, leaf: &LeafNode) -> Result<(), TrieError> {
+        self.buffer.push(TAG_EXTEND);
+        let compact_nibbles = leaf.partial.encode_compact();
+        self.write_bytes_with_len(&compact_nibbles);
 
-                let value_offset = self.buffer.len() as u64;
-                self.write_bytes_with_len(&leaf.value);
+        // Child offset = 0, value offset will be filled
+        self.buffer.extend_from_slice(&0u64.to_le_bytes());
+        let value_offset_pos = self.buffer.len();
+        self.buffer.extend_from_slice(&0u64.to_le_bytes());
 
-                // Go back and write the actual value offset
-                self.buffer[value_offset_pos + 8..value_offset_pos + 16]
-                    .copy_from_slice(&value_offset.to_le_bytes());
+        let value_offset = self.base_offset + self.buffer.len() as u64;
+        self.write_bytes_with_len(&leaf.value);
 
-                Ok(offset)
+        // Write actual value offset
+        self.buffer[value_offset_pos..value_offset_pos + 8]
+            .copy_from_slice(&value_offset.to_le_bytes());
+
+        Ok(())
+    }
+
+    fn serialize_extension(&mut self, ext: &ExtensionNode) -> Result<(), TrieError> {
+        self.buffer.push(TAG_EXTEND);
+        let compact_prefix = ext.prefix.encode_compact();
+        self.write_bytes_with_len(&compact_prefix);
+
+        // Child offset will be filled, value offset = 0
+        let child_offset_pos = self.buffer.len();
+        self.buffer.extend_from_slice(&0u64.to_le_bytes());
+        self.buffer.extend_from_slice(&0u64.to_le_bytes());
+
+        let child_offset = self.serialize_noderef(&ext.child)?;
+
+        // Write actual child offset
+        self.buffer[child_offset_pos..child_offset_pos + 8]
+            .copy_from_slice(&child_offset.to_le_bytes());
+
+        Ok(())
+    }
+
+    fn serialize_branch(&mut self, branch: &BranchNode) -> Result<(), TrieError> {
+        self.buffer.push(TAG_BRANCH);
+
+        // Reserve space for 16 child offsets + 1 value offset
+        let offsets_start = self.buffer.len();
+        for _ in 0..17 {
+            self.buffer.extend_from_slice(&0u64.to_le_bytes());
+        }
+
+        // Serialize children
+        let mut child_offsets = [0u64; 16];
+        for (i, child) in branch.choices.iter().enumerate() {
+            child_offsets[i] = self.serialize_noderef(child)?;
+        }
+
+        // Serialize offset
+        let value_offset = branch
+            .value
+            .is_empty()
+            .not()
+            .then(|| {
+                let offset = self.base_offset + self.buffer.len() as u64;
+                self.write_bytes_with_len(&branch.value);
+                offset
+            })
+            .unwrap_or_default();
+
+        // Write all offsets
+        let mut pos = offsets_start;
+        for &child_offset in &child_offsets {
+            self.buffer[pos..pos + 8].copy_from_slice(&child_offset.to_le_bytes());
+            pos += 8;
+        }
+        self.buffer[pos..pos + 8].copy_from_slice(&value_offset.to_le_bytes());
+
+        Ok(())
+    }
+
+    fn serialize_noderef(&mut self, noderef: &NodeRef) -> Result<u64, TrieError> {
+        match noderef {
+            NodeRef::Node(node, _) => self.serialize_node(node),
+            NodeRef::Hash(hash) if hash.is_valid() => {
+                // Node was previously committed - must exist in index
+                self.node_index
+                    .get(hash)
+                    .ok_or_else(|| panic!("Hash reference not found: {:?}", hash))
             }
-            Node::Extension(ext) => {
-                // Extension becomes Extend with only child
-                self.buffer.push(TAG_EXTEND);
-
-                let compact_prefix = ext.prefix.encode_compact();
-                self.write_bytes_with_len(&compact_prefix);
-
-                // Reserve space for offsets
-                let child_offset_pos = self.buffer.len();
-                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // child offset placeholder
-                self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset = 0
-
-                let child_offset = match &ext.child {
-                    NodeRef::Hash(hash) => {
-                        if hash.is_valid() {
-                            panic!("Hash references not supported in serialization");
-                        }
-                        0u64 // Empty child
-                    }
-                    NodeRef::Node(node, _) => self.serialize_node(node)?,
-                };
-
-                // Go back and write the actual child offset
-                if child_offset > 0 {
-                    self.buffer[child_offset_pos..child_offset_pos + 8]
-                        .copy_from_slice(&child_offset.to_le_bytes());
-                }
-
-                Ok(offset)
-            }
-            Node::Branch(branch) => {
-                // Branch stays Branch but with offsets
-                self.buffer.push(TAG_BRANCH);
-
-                // Reserve space for all offsets
-                let offsets_start = self.buffer.len();
-                // 16 child offsets + 1 value offset
-                for _ in 0..17 {
-                    self.buffer.extend_from_slice(&0u64.to_le_bytes());
-                }
-
-                // Serialize all children and collect their offsets
-                let mut child_offsets = [0u64; 16];
-                for (i, child) in branch.choices.iter().enumerate() {
-                    child_offsets[i] = match child {
-                        NodeRef::Hash(hash) => {
-                            if hash.is_valid() {
-                                panic!("Hash references not supported in serialization");
-                            }
-                            0u64
-                        }
-                        NodeRef::Node(node, _) => self.serialize_node(node)?,
-                    };
-                }
-
-                // Serialize value if present
-                let value_offset = if branch.value.is_empty() {
-                    0u64
-                } else {
-                    let offset = self.buffer.len() as u64;
-                    self.write_bytes_with_len(&branch.value);
-                    offset
-                };
-
-                // Go back and write all the actual offsets
-                let mut pos = offsets_start;
-                for &child_offset in &child_offsets {
-                    self.buffer[pos..pos + 8].copy_from_slice(&child_offset.to_le_bytes());
-                    pos += 8;
-                }
-                self.buffer[pos..pos + 8].copy_from_slice(&value_offset.to_le_bytes());
-
-                Ok(offset)
-            }
+            NodeRef::Hash(_) => Ok(0), // Empty/invalid hash
         }
     }
 
@@ -153,7 +220,7 @@ impl Serializer {
 /// Deserializes a Merkle Patricia Trie from a byte buffer.
 ///
 /// The deserializer reads the binary format produced by [`Serializer`].
-/// It uses the two node format and converts back to the standard 3 node format.
+/// It uses the two node format and converts back to the standard three node format.
 pub struct Deserializer<'a> {
     /// The byte buffer containing serialized trie data
     buffer: &'a [u8],
@@ -165,15 +232,8 @@ impl<'a> Deserializer<'a> {
         Self { buffer }
     }
 
-    /// Deserializes a tree from the two node format back to standard 3 node format
-    pub fn decode_tree(&self) -> Result<Node, TrieError> {
-        let node = self.decode_node_at(0)?;
-        node.compute_hash();
-        Ok(node)
-    }
-
-    /// Decodes a node from the two node format at specific position
-    fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
+    /// Decodes a node at specific position
+    pub fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
         if pos >= self.buffer.len() {
             panic!("Invalid buffer position");
         }
@@ -183,48 +243,34 @@ impl<'a> Deserializer<'a> {
 
         match tag {
             TAG_EXTEND => {
-                // Read nibbles length
                 let len = self.read_u32_at(position)? as usize;
                 position += 4;
 
-                // Read nibbles
-                if position + len > self.buffer.len() {
-                    panic!("Invalid buffer length");
-                }
                 let compact_nibbles = &self.buffer[position..position + len];
                 let nibbles = Nibbles::decode_compact(compact_nibbles);
                 position += len;
 
-                // Read node offset
                 let node_offset = self.read_u64_at(position)?;
                 position += 8;
-
-                // Read value offset
                 let value_offset = self.read_u64_at(position)?;
 
-                // Determine node type based on what's present
                 match (node_offset > 0, value_offset > 0) {
                     (false, true) => {
-                        // Only value = Leaf node
+                        // Leaf node
                         let value = self
                             .read_value_at_offset(value_offset as usize)?
                             .unwrap_or_default();
                         Ok(Node::Leaf(LeafNode::new(nibbles, value)))
                     }
                     (true, false) => {
-                        // Only child = Extension node
+                        // Extension node
                         let child = self.decode_node_at(node_offset as usize)?;
                         Ok(Node::Extension(ExtensionNode::new(
                             nibbles,
                             NodeRef::Node(Arc::new(child), OnceLock::new()),
                         )))
                     }
-                    (true, true) => {
-                        panic!("Extend node with both child and value not supported");
-                    }
-                    (false, false) => {
-                        panic!("Invalid Extend node with no child or value");
-                    }
+                    _ => panic!("Invalid Extend node with both child and value"),
                 }
             }
             TAG_BRANCH => {
@@ -234,11 +280,9 @@ impl<'a> Deserializer<'a> {
                     *child = self.read_u64_at(position)?;
                     position += 8;
                 }
-
-                // Read value offset
                 let value_offset = self.read_u64_at(position)?;
 
-                // Build children NodeRefs
+                // Build children
                 let mut children: [NodeRef; 16] = Default::default();
                 for (i, &offset) in child_offsets.iter().enumerate() {
                     if offset > 0 {
@@ -247,7 +291,7 @@ impl<'a> Deserializer<'a> {
                     }
                 }
 
-                // Read value if present
+                // Read value
                 let value = if value_offset > 0 {
                     self.read_value_at_offset(value_offset as usize)?
                         .unwrap_or_default()
@@ -259,18 +303,17 @@ impl<'a> Deserializer<'a> {
                     children, value,
                 ))))
             }
-            _ => panic!("Invalid node tag: {}", tag),
+            _ => panic!("Invalid node tag: {tag}"),
         }
     }
 
-    /// Gets a value by path without copying data
-    pub fn get_by_path(&self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
+    /// Gets a value by path starting at a specific offset
+    pub fn get_by_path_at(&self, path: &[u8], offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
         if self.buffer.is_empty() {
             return Ok(None);
         }
-
         let nibbles = Nibbles::from_raw(path, false);
-        self.get_by_path_inner(nibbles, 0)
+        self.get_by_path_inner(nibbles, offset)
     }
 
     /// Internal helper for get_by_path with position tracking
@@ -342,30 +385,27 @@ impl<'a> Deserializer<'a> {
                     // Recurse into the child
                     self.get_by_path_inner(path, node_offset as usize)
                 } else {
-                    panic!("Extend node with both child and value not supported");
+                    Ok(None)
                 }
             }
             TAG_BRANCH => {
                 if path.is_empty() {
                     // Skip 16 child offsets
                     position += 16 * 8;
+                    let value_offset =
+                        u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
 
                     if position + 8 > self.buffer.len() {
                         return Ok(None);
                     }
-                    let value_offset =
-                        u64::from_le_bytes(self.buffer[position..position + 8].try_into().unwrap());
-
                     if value_offset > 0 {
                         self.read_value_at_offset(value_offset as usize)
                     } else {
                         Ok(None)
                     }
                 } else {
-                    // Get next nibble and find corresponding child
-                    let next_nibble = match path.next_choice() {
-                        Some(nibble) => nibble,
-                        None => return Ok(None),
+                    let Some(next_nibble) = path.next_choice() else {
+                        return Ok(None);
                     };
 
                     // Read child offset at position next_nibble
@@ -387,7 +427,7 @@ impl<'a> Deserializer<'a> {
                     }
                 }
             }
-            _ => panic!("Invalid node tag: {}", tag),
+            _ => panic!("Invalid node tag: {tag}"),
         }
     }
 
@@ -428,16 +468,21 @@ impl<'a> Deserializer<'a> {
     }
 }
 
-/// Helper function to serialize a Merkle Patricia Trie node to bytes.
-pub fn serialize(node: &Node) -> Vec<u8> {
-    Serializer::new().serialize_tree(node).unwrap()
-}
-
 #[cfg(test)]
-mod test {
+mod tests {
+    use super::*;
     use crate::trie::{InMemoryTrieDB, Trie, node_hash::NodeHash};
 
-    use super::*;
+    /// Offset to skip the prepended previous root offset (8 bytes)
+    const ROOT_DATA_OFFSET: usize = 8;
+
+    /// Helper function to create [`Index`] and [`Serializer`] structures
+    /// and serialize a tree
+    fn serialize(root: &Node) -> (Vec<u8>, HashMap<NodeHash, u64>, u64) {
+        let index = Index::new();
+        let serializer = Serializer::new(&index, 0);
+        serializer.serialize_tree(root, 0).unwrap()
+    }
 
     fn new_temp() -> Trie {
         use std::collections::HashMap;
@@ -450,10 +495,6 @@ mod test {
         Trie::new(Box::new(db))
     }
 
-    fn deserialize(buffer: &[u8]) -> Node {
-        Deserializer::new(buffer).decode_tree().unwrap()
-    }
-
     #[test]
     fn test_serialize_deserialize_empty_leaf() {
         let leaf = Node::Leaf(LeafNode {
@@ -461,8 +502,10 @@ mod test {
             value: vec![],
         });
 
-        let bytes = serialize(&leaf);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&leaf);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(leaf, recovered);
     }
@@ -474,8 +517,10 @@ mod test {
             value: b"long_path_value".to_vec(),
         });
 
-        let bytes = serialize(&leaf);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&leaf);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(leaf, recovered);
     }
@@ -487,8 +532,10 @@ mod test {
             value: vec![],
         }));
 
-        let bytes = serialize(&branch);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&branch);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(branch, recovered);
     }
@@ -505,8 +552,11 @@ mod test {
             child: NodeRef::Node(Arc::new(leaf), OnceLock::new()),
         });
 
-        let bytes = serialize(&ext);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&ext);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
+
         assert_eq!(recovered, ext);
         match recovered {
             Node::Extension(ext_node) => {
@@ -551,8 +601,10 @@ mod test {
             child: NodeRef::Node(Arc::new(branch), OnceLock::new()),
         });
 
-        let bytes = serialize(&outer_ext);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&outer_ext);
+
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(recovered, outer_ext);
     }
@@ -570,8 +622,9 @@ mod test {
         trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let bytes = serialize(&root);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&root);
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(root, recovered);
     }
@@ -592,8 +645,9 @@ mod test {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let bytes = serialize(&root);
-        let recovered = deserialize(&bytes);
+        let (buffer, _, _) = serialize(&root);
+        let deserializer = Deserializer::new(&buffer);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(recovered, root);
     }
@@ -609,16 +663,17 @@ mod test {
 
         // Serialize to file
         let root = trie.root_node().unwrap().unwrap();
-        let serialized = serialize(&root);
+        let (buffer, _, _) = serialize(&root);
 
         let path = "/tmp/test_trie.mpt";
-        fs::write(path, &serialized).unwrap();
+        fs::write(path, &buffer).unwrap();
 
         // Read from file and deserialize
         let read_data = fs::read(path).unwrap();
-        let deserialized = deserialize(&read_data);
+        let deserializer = Deserializer::new(&read_data);
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
-        assert_eq!(root, deserialized);
+        assert_eq!(root, recovered);
         fs::remove_file(path).unwrap();
     }
 
@@ -628,16 +683,18 @@ mod test {
         trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
 
         let root = trie.root_node().unwrap().unwrap();
-        let buffer = serialize(&root);
+        let (buffer, _, _) = serialize(&root);
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path(b"test").unwrap(),
+            deserializer
+                .get_by_path_at(b"test", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"value".to_vec())
         );
 
         let deserializer = Deserializer::new(&buffer);
-        let recovered = deserializer.decode_tree().unwrap();
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
         assert_eq!(root, recovered);
     }
 
@@ -657,41 +714,41 @@ mod test {
         }
 
         let root = trie.root_node().unwrap().unwrap();
-        let buffer = serialize(&root);
+        let (buffer, _, _) = serialize(&root);
 
         let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path(b"horse").unwrap(),
+            deserializer
+                .get_by_path_at(b"horse", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"stallion".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path(b"dog").unwrap(),
+            deserializer
+                .get_by_path_at(b"dog", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"puppy".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path(b"doge").unwrap(),
+            deserializer
+                .get_by_path_at(b"doge", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"coin".to_vec())
         );
-
-        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
-            deserializer.get_by_path(b"do").unwrap(),
+            deserializer
+                .get_by_path_at(b"do", ROOT_DATA_OFFSET)
+                .unwrap(),
             Some(b"verb".to_vec())
         );
+        assert_eq!(
+            deserializer
+                .get_by_path_at(b"cat", ROOT_DATA_OFFSET)
+                .unwrap(),
+            None
+        );
 
-        let deserializer = Deserializer::new(&buffer);
-        assert_eq!(deserializer.get_by_path(b"cat").unwrap(), None);
-
-        let deserializer = Deserializer::new(&buffer);
-        assert_eq!(deserializer.get_by_path(b"").unwrap(), None);
-
-        // Reset position before decoding tree
-        let deserializer = Deserializer::new(&buffer);
-        let recovered = deserializer.decode_tree().unwrap();
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
         assert_eq!(root, recovered);
     }
 
@@ -746,11 +803,11 @@ mod test {
 
         let root = trie.root_node().unwrap().unwrap();
 
-        let buffer = serialize(&root);
+        let (buffer, _, _) = serialize(&root);
 
         for (key, expected_value) in &test_data {
             let deserializer = Deserializer::new(&buffer);
-            let retrieved_value = deserializer.get_by_path(key).unwrap();
+            let retrieved_value = deserializer.get_by_path_at(key, ROOT_DATA_OFFSET).unwrap();
             assert_eq!(retrieved_value, Some(expected_value.clone()));
         }
 
@@ -767,12 +824,12 @@ mod test {
 
         for key in &non_existent_keys {
             let deserializer = Deserializer::new(&buffer);
-            let result = deserializer.get_by_path(key).unwrap();
+            let result = deserializer.get_by_path_at(key, ROOT_DATA_OFFSET).unwrap();
             assert_eq!(result, None);
         }
 
         let deserializer = Deserializer::new(&buffer);
-        let recovered = deserializer.decode_tree().unwrap();
+        let recovered = deserializer.decode_node_at(ROOT_DATA_OFFSET).unwrap();
 
         assert_eq!(root, recovered);
     }

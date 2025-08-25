@@ -1,23 +1,33 @@
+//! File management
+//!
+//! The FileManager handles all low-level file operations for `EthrexDB`, implementing
+//! an append-only storage strategy where data is never overwritten. All writes go
+//! to the end of the file, preserving historical data and enabling version traversal.
+//!
+//! File Layout:
+//! ```text
+//! Offset 0: [header: 8 bytes]     // Points to latest root offset
+//! Offset 8: [commit_1_data...]    // First commit's data
+//! Offset X: [commit_2_data...]    // Second commit's data
+//! Offset Y: [commit_N_data...]    // Latest commit's data
+//! ```
+//!
+//! The header at offset 0 always contains the offset of the most recent root.
+//! This is the only part of the file that gets updated in-place. Everything else
+//! is append-only.
+//!
+//! Each commit's data starts with an 8-byte link to the previous root offset,
+//! creating a linked list through all versions:
+//! - First commit: prev_root_offset = 0 (marks end of chain)
+//! - Later commits: prev_root_offset = offset of previous root
+
 use crate::trie::TrieError;
 use memmap2::{Mmap, MmapOptions};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-/// Responsible for file management and offsets
-///
-/// File format:
-/// ```text
-/// [header: 8 bytes] -> points to latest root version
-/// [version 1: [prev_offset: 8 bytes][nodes]]
-/// [version 2: [prev_offset: 8 bytes][nodes]]
-/// ...
-/// [version N: [prev_offset: 8 bytes][nodes]] <- latest version
-/// ```
-///
-/// Each version contains:
-/// - prev_offset: Points to the previous version
-/// - nodes: Serialized trie nodes
+/// File manager for `EthrexDB`
 pub struct FileManager {
     /// File where the data is stored
     file: File,
@@ -27,7 +37,7 @@ pub struct FileManager {
 }
 
 impl FileManager {
-    /// Create a new database file
+    /// Create a new file
     pub fn create(file_path: PathBuf) -> Result<Self, TrieError> {
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -74,15 +84,12 @@ impl FileManager {
         Ok(u64::from_le_bytes(offset_bytes))
     }
 
-    /// Update the header to point to the new latest root version
+    /// Update the header to point to the new latest root offset
     pub fn update_latest_root_offset(&mut self, new_offset: u64) -> Result<(), TrieError> {
         self.file.seek(SeekFrom::Start(0)).unwrap();
         self.file.write_all(&new_offset.to_le_bytes()).unwrap();
         self.file.flush().unwrap();
-
-        // TODO: Check if this is needed
-        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
-
+        self.refresh_mmap();
         Ok(())
     }
 
@@ -91,11 +98,18 @@ impl FileManager {
         let offset = self.file.seek(SeekFrom::End(0)).unwrap();
         self.file.write_all(data).unwrap();
         self.file.flush().unwrap();
-
-        // TODO: Check if this is needed
-        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
-
+        self.refresh_mmap();
         Ok(offset)
+    }
+
+    /// Refresh memory map after file modifications
+    fn refresh_mmap(&mut self) {
+        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
+    }
+
+    /// Get the current file size
+    pub fn get_file_size(&self) -> Result<u64, TrieError> {
+        Ok(self.mmap.len() as u64)
     }
 
     /// Get slice from a specific offset to the end of the file
@@ -105,16 +119,6 @@ impl FileManager {
         }
 
         Ok(&self.mmap[offset as usize..])
-    }
-
-    /// Get slice of exactly n bytes from a specific offset
-    pub fn get_slice_at(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
-        let start = offset as usize;
-        let end = start + size;
-
-        assert!(end <= self.mmap.len(), "Offset out of bounds");
-
-        Ok(&self.mmap[start..end])
     }
 }
 
@@ -165,8 +169,14 @@ mod tests {
 
         {
             let mut fm = FileManager::create(file_path.clone()).unwrap();
+            assert_eq!(
+                fm.get_file_size().unwrap(),
+                8,
+                "File is empty but should have 8 bytes for the header"
+            );
             fm.update_latest_root_offset(456).unwrap();
             fm.write_at_end(b"persistent data").unwrap();
+            assert_ne!(fm.get_file_size().unwrap(), 8);
         }
 
         let fm = FileManager::open(file_path).unwrap();
@@ -174,5 +184,6 @@ mod tests {
 
         let data = fm.get_slice_to_end(8).unwrap().to_vec();
         assert_eq!(data, b"persistent data");
+        assert_ne!(fm.get_file_size().unwrap(), 8);
     }
 }

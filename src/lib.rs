@@ -4,6 +4,8 @@
 mod db;
 /// Interact with the file
 mod file_manager;
+/// In-memory index
+pub mod index;
 /// Serialization and deserialization of the trie.
 mod serialization;
 
