@@ -22,3 +22,8 @@ target/
 
 # Samply json
 profile.json.gz
+
+# LOC tooling generated files
+tooling/*.json
+tooling/*.md
+tooling/*.txt
