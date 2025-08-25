@@ -1,5 +1,7 @@
-name: Daily Lines of Code Report
+permissions:
+  contents: read
 
+name: Daily Lines of Code Report
 on:
   schedule:
     # Every day at UTC midnight
@@ -37,7 +39,7 @@ jobs:
 
       - name: Generate the loc report
         run: |
-          cd tooling && make loc-detailed
+          cd tooling && make loc
 
       - name: Save new loc_report.json to cache
         if: success()
@@ -51,10 +53,10 @@ jobs:
           cat tooling/loc_report_detailed.md >> $GITHUB_STEP_SUMMARY
 
       - name: Post results to Slack
-        if: always()
         run: |
           if [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
             curl -X POST -H 'Content-type: application/json' \
               --data @tooling/loc_report_slack_detailed.txt \
               "${{ secrets.SLACK_WEBHOOK }}"
+            echo "Slack message sent" >> $GITHUB_STEP_SUMMARY
           fi
