@@ -48,10 +48,7 @@ impl Decodable for NodeHashWrapper {
 
 /// Generate realistic 32-byte hash key (like account address)
 fn generate_account_hash(id: u64) -> Vec<u8> {
-    Keccak256::new()
-        .chain_update(id.to_be_bytes())
-        .finalize()
-        .to_vec()
+    Keccak256::digest(id.to_be_bytes()).to_vec()
 }
 
 /// Generate 104-byte account info: 2 hashes + u256 + u64
@@ -59,18 +56,10 @@ fn generate_account_info(id: u64) -> Vec<u8> {
     let mut value = Vec::with_capacity(104);
 
     // Storage hash (32 bytes)
-    value.extend_from_slice(
-        &Keccak256::new()
-            .chain_update((id * 2).to_be_bytes())
-            .finalize(),
-    );
+    value.extend_from_slice(&Keccak256::digest((id * 2).to_be_bytes()));
 
     // Code hash (32 bytes)
-    value.extend_from_slice(
-        &Keccak256::new()
-            .chain_update((id * 3).to_be_bytes())
-            .finalize(),
-    );
+    value.extend_from_slice(&Keccak256::digest((id * 3).to_be_bytes()));
 
     // Balance u256 (32 bytes) - deterministic based on id
     let balance = (id as u128 % 1000) * 1_000_000_000_000_000_000u128; // ETH in wei
