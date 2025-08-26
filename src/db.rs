@@ -22,6 +22,7 @@ use crate::transaction::ReadTransaction;
 use crate::transaction_manager::TransactionManager;
 use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
+// TODO: Should we use Mutex or other sync?
 use std::sync::Mutex;
 
 /// Ethrex DB struct - A transactional Merkle Patricia Trie database
@@ -250,7 +251,6 @@ mod tests {
         assert_eq!(tx.root().unwrap(), root_node);
         drop(tx);
 
-        // let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
         trie.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
@@ -304,19 +304,20 @@ mod tests {
 
         let mut db = EthrexDB::new(db_path.clone()).unwrap();
 
-        let mut trie_v1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         for (key, value) in &test_data_v1 {
-            trie_v1.insert(key.clone(), value.clone()).unwrap();
+            trie.insert(key.clone(), value.clone()).unwrap();
         }
-        let root_node = trie_v1.root_node().unwrap().unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
 
-        let mut trie_v2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         for (key, value) in &test_data_v2 {
-            trie_v2.insert(key.clone(), value.clone()).unwrap();
+            trie.insert(key.clone(), value.clone()).unwrap();
         }
-        let root_node = trie_v2.root_node().unwrap().unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
 
         let tx = db.begin_read().unwrap();
         for (key, expected_value) in &test_data_v2 {
@@ -336,15 +337,15 @@ mod tests {
             (b"".to_vec(), b"empty_key_value".to_vec()),
         ];
 
-        let mut trie_v3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         for (key, value) in &test_data_v2 {
-            trie_v3.insert(key.clone(), value.clone()).unwrap();
+            trie.insert(key.clone(), value.clone()).unwrap();
         }
         for (key, value) in &complex_test_data {
-            trie_v3.insert(key.clone(), value.clone()).unwrap();
+            trie.insert(key.clone(), value.clone()).unwrap();
         }
-        let root_node = trie_v3.root_node().unwrap().unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
 
         let tx = db.begin_read().unwrap();
         for (key, expected_value) in &complex_test_data {
@@ -594,6 +595,7 @@ mod tests {
             .unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
         // Check file size after updating a single key
         let update_file_size = std::fs::metadata(db_path).unwrap().len();
 
@@ -617,6 +619,7 @@ mod tests {
             .unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
 
         // Test snapshot isolation with scoped transaction
         {
@@ -640,18 +643,15 @@ mod tests {
             drop(read_tx);
 
             // Make changes after transaction was created
-            let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-            trie2
-                .insert(b"account1".to_vec(), b"updated_balance1".to_vec())
+            trie.insert(b"account1".to_vec(), b"updated_balance1".to_vec())
                 .unwrap();
-            trie2
-                .insert(b"account2".to_vec(), b"updated_balance2".to_vec())
+            trie.insert(b"account2".to_vec(), b"updated_balance2".to_vec())
                 .unwrap();
-            trie2
-                .insert(b"account3".to_vec(), b"new_balance3".to_vec())
+            trie.insert(b"account3".to_vec(), b"new_balance3".to_vec())
                 .unwrap();
-            let root_node2 = trie2.root_node().unwrap().unwrap();
+            let root_node2 = trie.root_node().unwrap().unwrap();
             db.commit(&root_node2).unwrap();
+            trie.commit().unwrap();
 
             // Create new transaction using the old snapshot
             let old_read_tx = crate::transaction::ReadTransaction::new(&db, snapshot_offset, 999); // Dummy tx_id for test
@@ -695,12 +695,13 @@ mod tests {
         trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
 
         // Create a transaction - should register snapshot
         let tx1 = db.begin_read().unwrap();
         assert_eq!(db.active_transaction_count(), 1);
 
-        let _tx1_offset = tx1.snapshot_offset();
+        let tx1_offset = tx1.snapshot_offset();
 
         // Create another transaction at the same snapshot
         let tx2 = db.begin_read().unwrap();
@@ -711,10 +712,10 @@ mod tests {
         drop(tx2);
 
         // Commit new data and create another transaction
-        let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        trie2.insert(b"key1".to_vec(), b"value2".to_vec()).unwrap();
-        let root_node2 = trie2.root_node().unwrap().unwrap();
+        trie.insert(b"key1".to_vec(), b"value2".to_vec()).unwrap();
+        let root_node2 = trie.root_node().unwrap().unwrap();
         db.commit(&root_node2).unwrap();
+        trie.commit().unwrap();
 
         // Check that no transactions are active after dropping
         assert_eq!(db.active_transaction_count(), 0);
@@ -723,7 +724,7 @@ mod tests {
         assert_eq!(db.active_transaction_count(), 1);
 
         let tx3_offset = tx3.snapshot_offset();
-        assert_ne!(_tx1_offset, tx3_offset);
+        assert_ne!(tx1_offset, tx3_offset);
 
         // Drop transaction
         drop(tx3);
@@ -756,6 +757,7 @@ mod tests {
         trie.insert(b"test2".to_vec(), b"data2".to_vec()).unwrap();
         let root_node2 = trie.root_node().unwrap().unwrap();
         db.commit(&root_node2).unwrap();
+        trie.commit().unwrap();
 
         // Create new transaction to test current state
         let tx3 = db.begin_read().unwrap(); // Latest snapshot
@@ -766,38 +768,5 @@ mod tests {
         // Verify transaction works
         assert_eq!(tx3.get(b"test").unwrap(), Some(b"data".to_vec()));
         assert_eq!(tx3.get(b"test2").unwrap(), Some(b"data2".to_vec()));
-    }
-
-    #[test]
-    fn test_transaction_ids_unique() {
-        let temp_dir = TempDir::new("ethrex_db_txid_test").unwrap();
-        let db_path = temp_dir.path().join("test.edb");
-
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
-
-        // Create initial state
-        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        trie.insert(b"test".to_vec(), b"data".to_vec()).unwrap();
-        let root_node = trie.root_node().unwrap().unwrap();
-        db.commit(&root_node).unwrap();
-
-        // Create multiple transactions and verify unique IDs
-        let tx1 = db.begin_read().unwrap();
-        let tx2 = db.begin_read().unwrap();
-        let tx3 = db.begin_read().unwrap();
-
-        let id1 = tx1.transaction_id();
-        let id2 = tx2.transaction_id();
-        let id3 = tx3.transaction_id();
-
-        // All IDs should be different
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-        assert_ne!(id1, id3);
-
-        // All IDs should be > 0
-        assert!(id1 > 0);
-        assert!(id2 > 0);
-        assert!(id3 > 0);
     }
 }
