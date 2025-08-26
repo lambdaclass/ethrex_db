@@ -1,7 +1,17 @@
-//! EthrexDB - A simple MPT database
+//! EthrexDB - Merkle Patricia Trie Database
+//!
+//! The database implements Copy-on-Write (CoW) optimization where only modified nodes
+//! are written during commits. Unchanged nodes are referenced by their file offset,
+//! avoiding duplication. All writes are append-only - data is never overwritten,
+//! only appended to the end of the file.
+//!
+//! Each commit creates a new root that links to the previous root via a prepended
+//! offset, forming a linked list of all historical states. This allows traversing
+//! the entire version history if needed.
 
 use crate::file_manager::FileManager;
-use crate::serialization::{Deserializer, serialize};
+use crate::index::Index;
+use crate::serialization::{Deserializer, Serializer};
 use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
 
@@ -9,142 +19,83 @@ use std::path::PathBuf;
 pub struct EthrexDB {
     /// File manager
     file_manager: FileManager,
+    /// Index mapping node hashes to their file offsets
+    /// TODO: Read from file if it exists to
+    node_index: Index,
 }
 
 impl EthrexDB {
     /// Create a new database
     pub fn new(file_path: PathBuf) -> Result<Self, TrieError> {
-        let file_manager = FileManager::create(file_path)?;
-        Ok(Self { file_manager })
+        let file_manager = FileManager::create(file_path.clone())?;
+        let node_index = Index::new();
+        Ok(Self {
+            file_manager,
+            node_index,
+        })
     }
 
     /// Open an existing database
     pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
-        let file_manager = FileManager::open(file_path)?;
-        Ok(Self { file_manager })
+        let file_manager = FileManager::open(file_path.clone())?;
+        // TODO: Read node index from file if it exists
+        let node_index = Index::new();
+        Ok(Self {
+            file_manager,
+            node_index,
+        })
     }
 
-    /// Commit a new trie to the database
-    ///
-    /// Creates a new version in the database by:
-    /// 1. Reading the current latest version offset from header
-    /// 2. Serializing the trie nodes
-    /// 3. Writing [previous_offset][serialized_nodes] at the end of file
-    /// 4. Updating the header to point to this new version
-    ///
-    /// NOTE: Right now, we are storing the complete trie in the database. We should
-    /// store only the root node and the updated nodes.
+    /// Commit a trie state to the database
     pub fn commit(&mut self, root_node: &Node) -> Result<NodeHash, TrieError> {
         let root_hash = root_node.compute_hash();
 
-        // Read the previous root offset from header
-        let previous_root_offset = self.file_manager.read_latest_root_offset()?;
+        let prev_root_offset = self.file_manager.read_latest_root_offset()?;
+        let base_offset = self.file_manager.get_file_size()?;
 
-        let serialized_trie = serialize(root_node);
+        let serializer = Serializer::new(&self.node_index, base_offset);
+        let (serialized_data, new_offsets, root_offset) =
+            serializer.serialize_tree(root_node, prev_root_offset)?;
 
-        // Prepare version data: [prev_offset(8 bytes)] + [trie_data]
-        let mut data_to_write = Vec::with_capacity(8 + serialized_trie.len());
-        data_to_write.extend_from_slice(&previous_root_offset.to_le_bytes());
-        data_to_write.extend_from_slice(&serialized_trie);
+        self.file_manager.write_at_end(&serialized_data)?;
 
-        // Write at the end and get the offset where this version starts
-        let new_root_offset = self.file_manager.write_at_end(&data_to_write)?;
+        // Update node index with new node offsets
+        for (hash, absolute_offset) in new_offsets {
+            self.node_index.insert(hash, absolute_offset);
+        }
 
-        // Update header to point to this new version
-        self.file_manager
-            .update_latest_root_offset(new_root_offset)?;
-
+        // Update header to point to the root node
+        self.file_manager.update_latest_root_offset(root_offset)?;
         Ok(root_hash)
     }
 
     /// Get the latest root node of the database
     pub fn root(&self) -> Result<Node, TrieError> {
         let latest_offset = self.file_manager.read_latest_root_offset()?;
-        let trie_data = self.get_trie_data_at_version(latest_offset)?;
-        let root_node = Deserializer::new(trie_data).decode_tree()?;
-        Ok(root_node)
+        if latest_offset == 0 {
+            panic!("No root node in database");
+        }
+
+        let file_data = self.file_manager.get_slice_to_end(0)?;
+        // All roots now have 8-byte prepended previous root offset
+        let actual_root_offset = latest_offset + 8;
+
+        Deserializer::new(file_data).decode_node_at(actual_root_offset as usize)
     }
 
     /// Get the value of the node with the given key
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
         let latest_offset = self.file_manager.read_latest_root_offset()?;
-        self.get_at_version(key, latest_offset)
-    }
-
-    /// Get the value of the node with the given key at a specific version
-    pub fn get_at_version(
-        &self,
-        key: &[u8],
-        version_offset: u64,
-    ) -> Result<Option<Vec<u8>>, TrieError> {
-        if version_offset == 0 {
+        if latest_offset == 0 {
             return Ok(None);
         }
 
-        let trie_data = self.get_trie_data_at_version(version_offset)?;
+        let file_data = self.file_manager.get_slice_to_end(0)?;
 
-        Deserializer::new(trie_data).get_by_path(key)
-    }
+        // All roots have 8-byte prepended previous root offset
+        let actual_root_offset = latest_offset + 8;
 
-    /// Get all the roots of the database
-    /// TODO: Make this an iterator
-    pub fn iter_roots(&self) -> Result<Vec<Node>, TrieError> {
-        let mut roots = Vec::new();
-        let mut current_offset = self.file_manager.read_latest_root_offset()?;
-
-        while current_offset != 0 {
-            let trie_data = self.get_trie_data_at_version(current_offset)?;
-
-            // Deserialize the trie at this version
-            let root_node = Deserializer::new(trie_data).decode_tree()?;
-            roots.push(root_node);
-            current_offset = self.read_previous_offset_at_version(current_offset)?;
-        }
-
-        Ok(roots)
-    }
-
-    /// Get trie data slice at a specific version
-    ///
-    /// Each version has format: [prev_offset: 8 bytes][trie_data]
-    /// This function skips the prev_offset and returns only the trie_data portion
-    fn get_trie_data_at_version(&self, version_offset: u64) -> Result<&[u8], TrieError> {
-        // Skip the previous offset (8 bytes) to get to the trie data
-        let trie_data_start = version_offset + 8;
-        let next_version_offset = self.find_next_version_offset(version_offset)?;
-
-        match next_version_offset {
-            Some(next_offset) => {
-                let size = (next_offset - trie_data_start) as usize;
-                self.file_manager.get_slice_at(trie_data_start, size)
-            }
-            None => {
-                // Last version, read until the end
-                self.file_manager.get_slice_to_end(trie_data_start)
-            }
-        }
-    }
-
-    /// Read the previous offset at a specific version
-    fn read_previous_offset_at_version(&self, version_offset: u64) -> Result<u64, TrieError> {
-        let prev_offset_slice = self.file_manager.get_slice_at(version_offset, 8)?;
-        Ok(u64::from_le_bytes(prev_offset_slice.try_into().unwrap()))
-    }
-
-    /// Find the offset of the next version after the given offset
-    fn find_next_version_offset(&self, current_offset: u64) -> Result<Option<u64>, TrieError> {
-        let mut offset = self.file_manager.read_latest_root_offset()?;
-        let mut next_offset = None;
-
-        // Walk the linked list to find the smallest offset greater than current_offset
-        while offset != 0 {
-            if offset > current_offset && (next_offset.is_none() || offset < next_offset.unwrap()) {
-                next_offset = Some(offset);
-            }
-            offset = self.read_previous_offset_at_version(offset)?;
-        }
-
-        Ok(next_offset)
+        Deserializer::new(file_data).get_by_path_at(key, actual_root_offset as usize)
     }
 }
 
@@ -229,10 +180,7 @@ mod tests {
         trie.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-
-        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
-        // and our serialization doesn't support hash references yet
-        // trie.commit().unwrap();
+        trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);
 
@@ -241,10 +189,7 @@ mod tests {
         trie.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-
-        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
-        // and our serialization doesn't support hash references yet
-        // trie.commit().unwrap();
+        trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);
 
@@ -252,10 +197,7 @@ mod tests {
         trie.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-
-        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
-        // and our serialization doesn't support hash references yet
-        // trie.commit().unwrap();
+        trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);
 
@@ -265,36 +207,6 @@ mod tests {
         assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
 
         assert_eq!(db.get(b"nonexistent").unwrap(), None);
-        assert_eq!(db.iter_roots().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn test_iter_roots() {
-        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
-        let db_path = temp_dir.path().join("test.edb");
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
-
-        // Empty DB should have no roots
-        let roots: Vec<Node> = db.iter_roots().unwrap();
-        assert_eq!(roots.len(), 0);
-
-        for i in 1..=3 {
-            let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-            trie.insert(
-                format!("key{}", i).into_bytes(),
-                format!("value{}", i).into_bytes(),
-            )
-            .unwrap();
-            let root_node = trie.root_node().unwrap().unwrap();
-            db.commit(&root_node).unwrap();
-        }
-
-        let roots: Vec<Node> = db.iter_roots().unwrap();
-        assert_eq!(roots.len(), 3);
-
-        for root in &roots {
-            root.compute_hash();
-        }
     }
 
     #[test]
@@ -367,12 +279,243 @@ mod tests {
             let result = db.get(key).unwrap();
             assert_eq!(result, Some(expected_value.clone()));
         }
+    }
 
-        let roots: Vec<Node> = db.iter_roots().unwrap();
-        assert_eq!(roots.len(), 3);
+    // Helper function to generate test data
+    fn generate_test_data(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        use sha3::{Digest, Keccak256};
 
-        for root in roots.iter() {
-            root.compute_hash();
+        (1..=n)
+            .map(|i| {
+                // 32-byte key (hash)
+                let key = Keccak256::new()
+                    .chain_update(i.to_be_bytes())
+                    .finalize()
+                    .to_vec();
+
+                // 104-byte value (account info: 2 hashes + u256 + u64)
+                let mut value = Vec::with_capacity(104);
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 2).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(
+                    &Keccak256::new()
+                        .chain_update((i * 3).to_be_bytes())
+                        .finalize(),
+                );
+                value.extend_from_slice(&[0u8; 24]); // u256 padding
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u256 value
+                value.extend_from_slice(&(i as u64).to_be_bytes()); // u64
+
+                (key, value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_blockchain_simulation_with_incremental_storage() {
+        let temp_dir = TempDir::new("ethrex_blockchain_sim").unwrap();
+        let db_path = temp_dir.path().join("blockchain.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+
+        // Batch 1: Initial accounts
+        let batch1_data = generate_test_data(100);
+
+        for (key, value) in batch1_data.iter() {
+            trie.insert(key.clone(), value.clone()).unwrap();
         }
+
+        let root_node1 = trie.root_node().unwrap().unwrap();
+        let trie_root_hash1 = root_node1.compute_hash();
+        let db_root_hash1 = db.commit(&root_node1).unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
+
+        assert_eq!(
+            trie_root_hash1, db_root_hash1,
+            "Root hashes must match after batch 1"
+        );
+        assert_eq!(
+            db.root().unwrap(),
+            root_node1,
+            "DB root must match trie root after batch 1"
+        );
+
+        // Batch 2: New transactions + modify some existing accounts
+        let new_accounts_batch2 = generate_test_data(150);
+
+        // Add 50 new accounts (indices 100-149)
+        for (key, value) in new_accounts_batch2[100..].iter() {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        // Modify some existing accounts from batch 1
+        for i in [10, 25, 50, 75].iter() {
+            if *i < batch1_data.len() {
+                let (key, _) = &batch1_data[*i];
+                let new_value = format!("modified_account_{}", i).into_bytes();
+                trie.insert(key.clone(), new_value).unwrap();
+            }
+        }
+
+        let root_node2 = trie.root_node().unwrap().unwrap();
+        let trie_root_hash2 = root_node2.compute_hash();
+        let db_root_hash2 = db.commit(&root_node2).unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
+
+        assert_eq!(
+            trie_root_hash2, db_root_hash2,
+            "Root hashes must match after batch 2"
+        );
+        assert_eq!(
+            db.root().unwrap(),
+            root_node2,
+            "DB root must match trie root after batch 2"
+        );
+
+        // Batch 3: More transactions
+        let new_accounts_batch3 = generate_test_data(200);
+
+        // Add 50 more new accounts (indices 150-199)
+        for (key, value) in &new_accounts_batch3[150..] {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        // Modify more existing accounts
+        for i in [5, 15, 35, 45, 110, 125].iter() {
+            if *i < 150 {
+                let test_data = generate_test_data(*i + 1);
+                let (key, _) = &test_data[*i];
+                let new_value = format!("batch3_modified_{}", i).into_bytes();
+                trie.insert(key.clone(), new_value).unwrap();
+            }
+        }
+
+        let root_node3 = trie.root_node().unwrap().unwrap();
+        let trie_root_hash3 = root_node3.compute_hash();
+        let db_root_hash3 = db.commit(&root_node3).unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
+
+        assert_eq!(
+            trie_root_hash3, db_root_hash3,
+            "Root hashes must match after batch 3"
+        );
+        assert_eq!(
+            db.root().unwrap(),
+            root_node3,
+            "DB root must match trie root after batch 3"
+        );
+
+        // Batch 4: Large update batch
+        let new_accounts_batch4 = generate_test_data(250);
+
+        // Add 50 more new accounts (indices 200-249)
+        for (key, value) in &new_accounts_batch4[200..] {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        // Modify many existing accounts
+        for i in [1, 20, 30, 40, 60, 80, 90, 105, 115, 135, 145, 170, 180].iter() {
+            if *i < 200 {
+                let test_data = generate_test_data(*i + 1);
+                let (key, _) = &test_data[*i];
+                let new_value = format!("batch4_update_{}", i).into_bytes();
+                trie.insert(key.clone(), new_value).unwrap();
+            }
+        }
+
+        let root_node4 = trie.root_node().unwrap().unwrap();
+        let trie_root_hash4 = root_node4.compute_hash();
+        let db_root_hash4 = db.commit(&root_node4).unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
+
+        assert_eq!(
+            trie_root_hash4, db_root_hash4,
+            "Root hashes must match after batch 4"
+        );
+        assert_eq!(
+            db.root().unwrap(),
+            root_node4,
+            "DB root must match trie root after batch 4"
+        );
+
+        // Batch 5: Final verification batch
+        let new_accounts_batch5 = generate_test_data(300);
+
+        // Add 50 final accounts (indices 250-299)
+        for (key, value) in &new_accounts_batch5[250..] {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+
+        // Few more modifications
+        for i in [8, 28, 58, 88, 128, 158, 188, 218].iter() {
+            if *i < 250 {
+                let test_data = generate_test_data(*i + 1);
+                let (key, _) = &test_data[*i];
+                let new_value = format!("final_update_{}", i).into_bytes();
+                trie.insert(key.clone(), new_value).unwrap();
+            }
+        }
+
+        let root_node5 = trie.root_node().unwrap().unwrap();
+        let trie_root_hash5 = root_node5.compute_hash();
+        let db_root_hash5 = db.commit(&root_node5).unwrap();
+        trie.commit().unwrap(); // Convert to NodeRef::Hash
+
+        assert_eq!(
+            trie_root_hash5, db_root_hash5,
+            "Root hashes must match after batch 5"
+        );
+        assert_eq!(
+            db.root().unwrap(),
+            root_node5,
+            "DB root must match trie root after batch 5"
+        );
+
+        // Random verification of some accounts
+        for batch_num in 1..=5 {
+            let test_data = generate_test_data(batch_num * 50);
+            if let Some((key, _)) = test_data.get(batch_num * 10) {
+                assert_eq!(db.get(key).unwrap(), trie.get(key).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn test_file_size() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+
+        // Insert 100,000 keys
+        for i in 0..100_000 {
+            let key = format!("key_{}", i);
+            let value = format!("value_{}", i);
+            trie.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec())
+                .unwrap();
+        }
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        trie.commit().unwrap();
+        // Check file size after inserting 100,000 keys
+        let insert_file_size = std::fs::metadata(db_path.clone()).unwrap().len();
+
+        // Update a single key
+        trie.insert(b"key_1".to_vec(), b"updated_value".to_vec())
+            .unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+        // Check file size after updating a single key
+        let update_file_size = std::fs::metadata(db_path).unwrap().len();
+
+        // File after update should have a very small increase
+        assert!(insert_file_size < update_file_size);
+        assert!(update_file_size < insert_file_size + 1000);
     }
 }
