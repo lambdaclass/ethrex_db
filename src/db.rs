@@ -19,19 +19,24 @@ use crate::file_manager::FileManager;
 use crate::index::Index;
 use crate::serialization::{Deserializer, Serializer};
 use crate::transaction::ReadTransaction;
+use crate::transaction_manager::TransactionManager;
 use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Ethrex DB struct - A transactional Merkle Patricia Trie database
 ///
 /// This database requires all read operations to be performed through transactions
-/// to ensure snapshot isolation and data consistency.
+/// to ensure snapshot isolation and data consistency. It includes reference counting
+/// to prevent pruning of snapshots that are still in use.
 pub struct EthrexDB {
     /// File manager
     file_manager: FileManager,
     /// Index mapping node hashes to their file offsets
     /// TODO: Read from file if it exists to
     node_index: Index,
+    /// Transaction manager for reference counting and safe pruning
+    transaction_manager: Mutex<TransactionManager>,
 }
 
 impl EthrexDB {
@@ -39,9 +44,11 @@ impl EthrexDB {
     pub fn new(file_path: PathBuf) -> Result<Self, TrieError> {
         let file_manager = FileManager::create(file_path.clone())?;
         let node_index = Index::new();
+        let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
             file_manager,
             node_index,
+            transaction_manager,
         })
     }
 
@@ -50,9 +57,11 @@ impl EthrexDB {
         let file_manager = FileManager::open(file_path.clone())?;
         // TODO: Read node index from file if it exists
         let node_index = Index::new();
+        let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
             file_manager,
             node_index,
+            transaction_manager,
         })
     }
 
@@ -114,7 +123,39 @@ impl EthrexDB {
     /// any changes committed after the transaction is created
     pub fn begin_read(&self) -> Result<ReadTransaction, TrieError> {
         let snapshot_root_offset = self.file_manager.read_latest_root_offset()?;
-        Ok(ReadTransaction::new(self, snapshot_root_offset))
+
+        // Register the snapshot with the transaction manager
+        let tx_id = self
+            .transaction_manager
+            .lock()
+            .map_err(|_| TrieError::LockError)?
+            .register_snapshot(snapshot_root_offset);
+
+        Ok(ReadTransaction::new(self, snapshot_root_offset, tx_id))
+    }
+
+    /// Unregisters a snapshot from the transaction manager
+    /// This is called internally when a transaction is dropped
+    pub(crate) fn unregister_snapshot(&self, offset: u64) {
+        if let Ok(mut tm) = self.transaction_manager.lock() {
+            tm.unregister_snapshot(offset);
+        }
+    }
+
+    /// Returns the total number of active transactions
+    pub fn active_transaction_count(&self) -> usize {
+        self.transaction_manager
+            .lock()
+            .map(|tm| tm.active_transaction_count())
+            .unwrap_or(0)
+    }
+
+    /// Returns a list of all active snapshot offsets that should not be pruned
+    pub fn get_protected_offsets(&self) -> Vec<u64> {
+        self.transaction_manager
+            .lock()
+            .map(|tm| tm.get_active_offsets())
+            .unwrap_or_default()
     }
 }
 
@@ -613,7 +654,7 @@ mod tests {
             db.commit(&root_node2).unwrap();
 
             // Create new transaction using the old snapshot
-            let old_read_tx = crate::transaction::ReadTransaction::new(&db, snapshot_offset);
+            let old_read_tx = crate::transaction::ReadTransaction::new(&db, snapshot_offset, 999); // Dummy tx_id for test
 
             // Verify transaction still sees old data
             assert_eq!(
@@ -637,5 +678,126 @@ mod tests {
                 Some(b"new_balance3".to_vec())
             );
         }
+    }
+
+    #[test]
+    fn test_transaction_manager_reference_counting() {
+        let temp_dir = TempDir::new("ethrex_db_txmgr_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        // Initially no active transactions
+        assert_eq!(db.active_transaction_count(), 0);
+
+        // Create initial state
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+
+        // Create a transaction - should register snapshot
+        let tx1 = db.begin_read().unwrap();
+        assert_eq!(db.active_transaction_count(), 1);
+
+        let _tx1_offset = tx1.snapshot_offset();
+
+        // Create another transaction at the same snapshot
+        let tx2 = db.begin_read().unwrap();
+        assert_eq!(db.active_transaction_count(), 2);
+
+        // Drop transactions to allow commit
+        drop(tx1);
+        drop(tx2);
+
+        // Commit new data and create another transaction
+        let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie2.insert(b"key1".to_vec(), b"value2".to_vec()).unwrap();
+        let root_node2 = trie2.root_node().unwrap().unwrap();
+        db.commit(&root_node2).unwrap();
+
+        // Check that no transactions are active after dropping
+        assert_eq!(db.active_transaction_count(), 0);
+
+        let tx3 = db.begin_read().unwrap();
+        assert_eq!(db.active_transaction_count(), 1);
+
+        let tx3_offset = tx3.snapshot_offset();
+        assert_ne!(_tx1_offset, tx3_offset);
+
+        // Drop transaction
+        drop(tx3);
+        assert_eq!(db.active_transaction_count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_manager_info() {
+        let temp_dir = TempDir::new("ethrex_db_txmgr_info_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        // Create initial state
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"test".to_vec(), b"data".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+
+        // Create multiple transactions
+        let tx1 = db.begin_read().unwrap();
+        let _tx2 = db.begin_read().unwrap(); // Same snapshot
+        let _tx1_offset = tx1.snapshot_offset();
+
+        // Drop transactions to allow commit
+        drop(tx1);
+        drop(_tx2);
+
+        // Commit new data
+        trie.insert(b"test2".to_vec(), b"data2".to_vec()).unwrap();
+        let root_node2 = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node2).unwrap();
+
+        // Create new transaction to test current state
+        let tx3 = db.begin_read().unwrap(); // Latest snapshot
+
+        let protected_offsets = db.get_protected_offsets();
+        assert_eq!(protected_offsets.len(), 1);
+
+        // Verify transaction works
+        assert_eq!(tx3.get(b"test").unwrap(), Some(b"data".to_vec()));
+        assert_eq!(tx3.get(b"test2").unwrap(), Some(b"data2".to_vec()));
+    }
+
+    #[test]
+    fn test_transaction_ids_unique() {
+        let temp_dir = TempDir::new("ethrex_db_txid_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        // Create initial state
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"test".to_vec(), b"data".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
+
+        // Create multiple transactions and verify unique IDs
+        let tx1 = db.begin_read().unwrap();
+        let tx2 = db.begin_read().unwrap();
+        let tx3 = db.begin_read().unwrap();
+
+        let id1 = tx1.transaction_id();
+        let id2 = tx2.transaction_id();
+        let id3 = tx3.transaction_id();
+
+        // All IDs should be different
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+
+        // All IDs should be > 0
+        assert!(id1 > 0);
+        assert!(id2 > 0);
+        assert!(id3 > 0);
     }
 }
