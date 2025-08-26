@@ -10,6 +10,8 @@ pub mod index;
 mod serialization;
 /// Transaction management for snapshot isolation.
 mod transaction;
+/// Transaction manager for reference counting and safe pruning.
+mod transaction_manager;
 
 // ETHREX COPY STRUCTURES
 mod rlp;
