@@ -8,9 +8,12 @@ mod file_manager;
 pub mod index;
 /// Serialization and deserialization of the trie.
 mod serialization;
+/// Transaction management for snapshot isolation.
+mod transaction;
 
 // ETHREX COPY STRUCTURES
 mod rlp;
 pub mod trie;
 
 pub use db::EthrexDB;
+pub use transaction::ReadTransaction;
