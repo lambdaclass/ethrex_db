@@ -132,10 +132,10 @@ pub fn slack_detailed_message(detailed_files: &HashMap<String, usize>) -> String
     let mut files: Vec<_> = detailed_files.iter().collect();
     files.sort_by_key(|(name, _)| *name);
 
-    let mut detailed_text = format!("*Total: {} lines*\n\n", total_loc);
+    let mut detailed_text = format!("*Total: {} lines*\\n\\n", total_loc);
 
     for (file_name, loc) in files {
-        detailed_text.push_str(&format!("• `{}`: {} lines\n", file_name, loc));
+        detailed_text.push_str(&format!("`{}`: {} lines\\n", file_name, loc));
     }
 
     format!(
