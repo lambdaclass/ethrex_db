@@ -187,8 +187,6 @@ fn run_ethrex_benchmark(
     // Get root hash for validation
     let root_hash = tx.root().unwrap().compute_hash();
 
-    drop(tx);
-
     // Cleanup
     let _ = fs::remove_file(&db_path);
 
