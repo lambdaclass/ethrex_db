@@ -154,7 +154,7 @@ fn run_ethrex_benchmark(
     let db_path = PathBuf::from("ethrex_bench.edb");
     let _ = fs::remove_file(&db_path);
 
-    let mut db = EthrexDB::new(db_path.clone())?;
+    let db = EthrexDB::new(db_path.clone())?;
     let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
     let batch_size = 15_000;
@@ -177,14 +177,15 @@ fn run_ethrex_benchmark(
 
     let read_start = Instant::now();
 
+    let tx = db.begin_read().unwrap();
     for key in sample_keys {
-        db.get(key).unwrap().unwrap();
+        tx.get(key).unwrap().unwrap();
     }
 
     let read_time = read_start.elapsed();
 
     // Get root hash for validation
-    let root_hash = db.root().unwrap().compute_hash();
+    let root_hash = tx.root().unwrap().compute_hash();
 
     // Cleanup
     let _ = fs::remove_file(&db_path);

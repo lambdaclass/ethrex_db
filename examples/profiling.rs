@@ -7,7 +7,7 @@ use std::time::Instant;
 
 fn main() {
     let db_path = std::env::temp_dir().join("profile_gets.edb");
-    let mut db = EthrexDB::new(db_path).unwrap();
+    let db = EthrexDB::new(db_path).unwrap();
 
     println!("Phase 1: Inserting 1,000,000 keys...");
 
@@ -56,7 +56,7 @@ fn main() {
             keys[rng.gen_range(0..keys.len())].clone()
         };
 
-        match db.get(key.as_bytes()).unwrap() {
+        match db.begin_read().unwrap().get(key.as_bytes()).unwrap() {
             Some(_) => hit_count += 1,
             None => miss_count += 1,
         }
