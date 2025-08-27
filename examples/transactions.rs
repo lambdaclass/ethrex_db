@@ -45,16 +45,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protected_offsets = db.get_protected_offsets();
     assert_eq!(protected_offsets.len(), 1);
 
-    // Drop the transaction to release the immutable borrow
-    drop(read_tx);
-
-    let new_protected_offsets = db.get_protected_offsets();
-    assert_eq!(
-        new_protected_offsets.len(),
-        0,
-        "Protected offsets should be empty since we dropped the transaction"
-    );
-
     // Make changes to the database while transaction exists
     println!("\nMaking changes to database");
 

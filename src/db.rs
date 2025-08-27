@@ -23,7 +23,7 @@ use crate::transaction_manager::TransactionManager;
 use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
 // TODO: Should we use Mutex or other sync?
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Ethrex DB struct - A transactional Merkle Patricia Trie database
 ///
@@ -32,10 +32,10 @@ use std::sync::Mutex;
 /// to prevent pruning of snapshots that are still in use.
 pub struct EthrexDB {
     /// File manager
-    file_manager: FileManager,
+    file_manager: RwLock<FileManager>,
     /// Index mapping node hashes to their file offsets
     /// TODO: Read from file if it exists to
-    node_index: Index,
+    node_index: RwLock<Index>,
     /// Transaction manager for reference counting and safe pruning
     transaction_manager: Mutex<TransactionManager>,
 }
@@ -47,8 +47,8 @@ impl EthrexDB {
         let node_index = Index::new();
         let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
-            file_manager,
-            node_index,
+            file_manager: RwLock::new(file_manager),
+            node_index: RwLock::new(node_index),
             transaction_manager,
         })
     }
@@ -60,32 +60,39 @@ impl EthrexDB {
         let node_index = Index::new();
         let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
-            file_manager,
-            node_index,
+            file_manager: RwLock::new(file_manager),
+            node_index: RwLock::new(node_index),
             transaction_manager,
         })
     }
 
     /// Commit a trie state to the database
-    pub fn commit(&mut self, root_node: &Node) -> Result<NodeHash, TrieError> {
+    pub fn commit(&self, root_node: &Node) -> Result<NodeHash, TrieError> {
         let root_hash = root_node.compute_hash();
 
-        let prev_root_offset = self.file_manager.read_latest_root_offset()?;
-        let base_offset = self.file_manager.get_file_size()?;
+        // Get write locks for both file_manager and node_index
+        let mut file_manager = self
+            .file_manager
+            .write()
+            .map_err(|_| TrieError::LockError)?;
+        let mut node_index = self.node_index.write().map_err(|_| TrieError::LockError)?;
 
-        let serializer = Serializer::new(&self.node_index, base_offset);
+        let prev_root_offset = file_manager.read_latest_root_offset()?;
+        let base_offset = file_manager.get_file_size()?;
+
+        let serializer = Serializer::new(&node_index, base_offset);
         let (serialized_data, new_offsets, root_offset) =
             serializer.serialize_tree(root_node, prev_root_offset)?;
 
-        self.file_manager.write_at_end(&serialized_data)?;
+        file_manager.write_at_end(&serialized_data)?;
 
         // Update node index with new node offsets
         for (hash, absolute_offset) in new_offsets {
-            self.node_index.insert(hash, absolute_offset);
+            node_index.insert(hash, absolute_offset);
         }
 
         // Update header to point to the root node
-        self.file_manager.update_latest_root_offset(root_offset)?;
+        file_manager.update_latest_root_offset(root_offset)?;
         Ok(root_hash)
     }
 
@@ -95,7 +102,8 @@ impl EthrexDB {
             panic!("No root node at offset");
         }
 
-        let file_data = self.file_manager.get_slice_to_end(0)?;
+        let file_manager = self.file_manager.read().map_err(|_| TrieError::LockError)?;
+        let file_data = file_manager.get_slice_to_end(0)?;
         // All roots have 8-byte prepended previous root offset
         let actual_root_offset = root_offset + 8;
 
@@ -112,7 +120,8 @@ impl EthrexDB {
             return Ok(None);
         }
 
-        let file_data = self.file_manager.get_slice_to_end(0)?;
+        let file_manager = self.file_manager.read().map_err(|_| TrieError::LockError)?;
+        let file_data = file_manager.get_slice_to_end(0)?;
         // All roots have 8-byte prepended previous root offset
         let actual_root_offset = root_offset + 8;
 
@@ -123,7 +132,12 @@ impl EthrexDB {
     /// The transaction will provide a consistent snapshot view and will not see
     /// any changes committed after the transaction is created
     pub fn begin_read(&self) -> Result<ReadTransaction, TrieError> {
-        let snapshot_root_offset = self.file_manager.read_latest_root_offset()?;
+        let snapshot_root_offset = {
+            self.file_manager
+                .read()
+                .map_err(|_| TrieError::LockError)?
+                .read_latest_root_offset()?
+        };
 
         // Register the snapshot with the transaction manager
         let tx_id = self
@@ -736,7 +750,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_txmgr_info_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         // Create initial state
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
@@ -746,12 +760,7 @@ mod tests {
 
         // Create multiple transactions
         let tx1 = db.begin_read().unwrap();
-        let _tx2 = db.begin_read().unwrap(); // Same snapshot
-        let _tx1_offset = tx1.snapshot_offset();
-
-        // Drop transactions to allow commit
-        drop(tx1);
-        drop(_tx2);
+        let tx2 = db.begin_read().unwrap(); // Same snapshot
 
         // Commit new data
         trie.insert(b"test2".to_vec(), b"data2".to_vec()).unwrap();
@@ -759,11 +768,18 @@ mod tests {
         db.commit(&root_node2).unwrap();
         trie.commit().unwrap();
 
+        assert_eq!(tx1.get(b"test").unwrap(), Some(b"data".to_vec()));
+        assert_eq!(tx1.get(b"test2").unwrap(), None);
+        assert_eq!(tx2.get(b"test").unwrap(), Some(b"data".to_vec()));
+        assert_eq!(tx2.get(b"test2").unwrap(), None);
+
         // Create new transaction to test current state
         let tx3 = db.begin_read().unwrap(); // Latest snapshot
 
         let protected_offsets = db.get_protected_offsets();
-        assert_eq!(protected_offsets.len(), 1);
+        // tx1 and tx2 are protected in the same snapshot
+        // tx3 is protected in the new snapshot
+        assert_eq!(protected_offsets.len(), 2);
 
         // Verify transaction works
         assert_eq!(tx3.get(b"test").unwrap(), Some(b"data".to_vec()));
