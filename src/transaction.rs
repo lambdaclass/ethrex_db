@@ -65,7 +65,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_tx_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         // Setup initial state
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
@@ -126,7 +126,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_multi_tx_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie.insert(b"counter".to_vec(), b"1".to_vec()).unwrap();

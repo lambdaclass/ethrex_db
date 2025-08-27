@@ -154,7 +154,7 @@ fn run_ethrex_benchmark(
     let db_path = PathBuf::from("ethrex_bench.edb");
     let _ = fs::remove_file(&db_path);
 
-    let mut db = EthrexDB::new(db_path.clone())?;
+    let db = EthrexDB::new(db_path.clone())?;
     let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
     let batch_size = 15_000;

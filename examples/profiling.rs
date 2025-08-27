@@ -7,7 +7,7 @@ use std::time::Instant;
 
 fn main() {
     let db_path = std::env::temp_dir().join("profile_gets.edb");
-    let mut db = EthrexDB::new(db_path).unwrap();
+    let db = EthrexDB::new(db_path).unwrap();
 
     println!("Phase 1: Inserting 1,000,000 keys...");
 

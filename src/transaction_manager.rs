@@ -25,13 +25,13 @@ impl TransactionManager {
     /// Registers a new transaction using the given snapshot offset
     /// Returns a unique transaction ID
     pub fn register_snapshot(&mut self, offset: u64) -> TransactionId {
-        let tx_id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
+        let tx_id = self.next_tx_id.fetch_add(1, Ordering::Relaxed);
 
         // Increment reference count for this offset
         self.active_snapshots
             .entry(offset)
             .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, Ordering::Relaxed);
 
         tx_id
     }
@@ -40,7 +40,7 @@ impl TransactionManager {
     /// If the count reaches zero, the snapshot is removed from tracking
     pub fn unregister_snapshot(&mut self, offset: u64) {
         if let Some(count) = self.active_snapshots.get(&offset) {
-            let new_count = count.fetch_sub(1, Ordering::SeqCst);
+            let new_count = count.fetch_sub(1, Ordering::Relaxed);
 
             // If count reached 0 (was 1, now 0), remove from HashMap
             if new_count == 1 {
@@ -58,7 +58,7 @@ impl TransactionManager {
     pub fn active_transaction_count(&self) -> usize {
         self.active_snapshots
             .values()
-            .map(|count| count.load(Ordering::SeqCst) as usize)
+            .map(|count| count.load(Ordering::Relaxed) as usize)
             .sum()
     }
 }

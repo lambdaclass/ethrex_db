@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new("ethrex_transaction_example")?;
     let db_path = temp_dir.path().join("example.edb");
 
-    let mut db = EthrexDB::new(db_path)?;
+    let db = EthrexDB::new(db_path)?;
 
     println!("EthrexDB Transaction Example\n");
 
