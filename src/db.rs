@@ -22,7 +22,7 @@ use crate::transaction::ReadTransaction;
 use crate::transaction_manager::TransactionManager;
 use crate::trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
-// TODO: Should we use Mutex or other sync?
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 /// Ethrex DB struct - A transactional Merkle Patricia Trie database
@@ -36,6 +36,10 @@ pub struct EthrexDB {
     /// Index mapping node hashes to their file offsets
     /// TODO: Read from file if it exists to
     node_index: RwLock<Index>,
+    /// Latest root offset stored atomically
+    latest_root_offset: AtomicU64,
+    /// Mutex to ensure only one commit at a time
+    commit_mutex: Mutex<()>,
     /// Transaction manager for reference counting and safe pruning
     transaction_manager: Mutex<TransactionManager>,
 }
@@ -45,10 +49,15 @@ impl EthrexDB {
     pub fn new(file_path: PathBuf) -> Result<Self, TrieError> {
         let file_manager = FileManager::create(file_path.clone())?;
         let node_index = Index::new();
+        // Empty DB has root offset 0
+        let latest_root_offset = AtomicU64::new(0);
+        let commit_mutex = Mutex::new(());
         let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
             file_manager: RwLock::new(file_manager),
             node_index: RwLock::new(node_index),
+            latest_root_offset,
+            commit_mutex,
             transaction_manager,
         })
     }
@@ -58,42 +67,56 @@ impl EthrexDB {
         let file_manager = FileManager::open(file_path.clone())?;
         // TODO: Read node index from file if it exists
         let node_index = Index::new();
+        let latest_root_offset = AtomicU64::new(file_manager.read_latest_root_offset()?);
+        let commit_mutex = Mutex::new(());
         let transaction_manager = Mutex::new(TransactionManager::new());
         Ok(Self {
             file_manager: RwLock::new(file_manager),
             node_index: RwLock::new(node_index),
+            latest_root_offset,
+            commit_mutex,
             transaction_manager,
         })
     }
 
     /// Commit a trie state to the database
     pub fn commit(&self, root_node: &Node) -> Result<NodeHash, TrieError> {
-        let root_hash = root_node.compute_hash();
+        // Ensure only one commit at a time
+        let _commit_guard = self.commit_mutex.lock().map_err(|_| TrieError::LockError)?;
 
-        // Get write locks for both file_manager and node_index
-        let mut file_manager = self
-            .file_manager
-            .write()
-            .map_err(|_| TrieError::LockError)?;
-        let mut node_index = self.node_index.write().map_err(|_| TrieError::LockError)?;
+        let prev_root_offset = self.latest_root_offset.load(Ordering::Acquire);
 
-        let prev_root_offset = file_manager.read_latest_root_offset()?;
-        let base_offset = file_manager.get_file_size()?;
+        let base_offset = {
+            let fm = self.file_manager.read().map_err(|_| TrieError::LockError)?;
+            fm.get_file_size()?
+        }; // Drop read lock
 
-        let serializer = Serializer::new(&node_index, base_offset);
-        let (serialized_data, new_offsets, root_offset) =
-            serializer.serialize_tree(root_node, prev_root_offset)?;
+        let (serialized_data, new_offsets, root_offset) = {
+            let node_index = self.node_index.read().map_err(|_| TrieError::LockError)?;
+            let serializer = Serializer::new(&node_index, base_offset);
+            serializer.serialize_tree(root_node, prev_root_offset)?
+        }; // Drop node_index read lock here
 
-        file_manager.write_at_end(&serialized_data)?;
+        {
+            let mut fm = self
+                .file_manager
+                .write()
+                .map_err(|_| TrieError::LockError)?;
+            fm.write_at_end(&serialized_data)?;
+            fm.update_latest_root_offset(root_offset)?;
+        } // Drop write lock
 
-        // Update node index with new node offsets
-        for (hash, absolute_offset) in new_offsets {
-            node_index.insert(hash, absolute_offset);
-        }
+        {
+            let mut node_index = self.node_index.write().map_err(|_| TrieError::LockError)?;
+            for (hash, absolute_offset) in new_offsets {
+                node_index.insert(hash, absolute_offset);
+            }
+        } // Drop write lock
 
-        // Update header to point to the root node
-        file_manager.update_latest_root_offset(root_offset)?;
-        Ok(root_hash)
+        self.latest_root_offset
+            .store(root_offset, Ordering::Release);
+
+        Ok(root_node.compute_hash())
     }
 
     /// Get the root node at a specific offset
@@ -132,12 +155,7 @@ impl EthrexDB {
     /// The transaction will provide a consistent snapshot view and will not see
     /// any changes committed after the transaction is created
     pub fn begin_read(&self) -> Result<ReadTransaction, TrieError> {
-        let snapshot_root_offset = {
-            self.file_manager
-                .read()
-                .map_err(|_| TrieError::LockError)?
-                .read_latest_root_offset()?
-        };
+        let snapshot_root_offset = self.latest_root_offset.load(Ordering::Acquire);
 
         // Register the snapshot with the transaction manager
         let tx_id = self
@@ -186,7 +204,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
@@ -203,7 +221,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.edb");
 
         {
-            let mut db = EthrexDB::new(db_path.clone()).unwrap();
+            let db = EthrexDB::new(db_path.clone()).unwrap();
 
             let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
             trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
@@ -222,7 +240,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         // Test getting from empty db
         let tx = db.begin_read().unwrap();
@@ -252,7 +270,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
@@ -316,7 +334,7 @@ mod tests {
             (b"0xabcdef".to_vec(), b"hex_new".to_vec()),
         ];
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         for (key, value) in &test_data_v1 {
@@ -406,7 +424,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_blockchain_sim").unwrap();
         let db_path = temp_dir.path().join("blockchain.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
         // Batch 1: Initial accounts
@@ -587,7 +605,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
 
@@ -623,7 +641,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_tx_integration").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         // Create initial state
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
@@ -699,7 +717,7 @@ mod tests {
         let temp_dir = TempDir::new("ethrex_db_txmgr_test").unwrap();
         let db_path = temp_dir.path().join("test.edb");
 
-        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+        let db = EthrexDB::new(db_path.clone()).unwrap();
 
         // Initially no active transactions
         assert_eq!(db.active_transaction_count(), 0);
