@@ -34,8 +34,8 @@ impl PersistentTrie {
     ///
     /// The page contains key-value pairs in a slotted array format.
     pub fn load_from_page(page_data: &[u8]) -> Self {
-        let arr = SlottedArray::from_bytes(Self::page_data_to_array(page_data));
-        let mut trie = MerkleTrie::new();
+        let _arr = SlottedArray::from_bytes(Self::page_data_to_array(page_data));
+        let trie = MerkleTrie::new();
 
         // Reconstruct trie from stored entries
         // Note: SlottedArray doesn't have an iterator, so we'd need to add one

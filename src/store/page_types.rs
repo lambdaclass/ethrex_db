@@ -3,7 +3,6 @@
 //! Each page type provides specific functionality while sharing the common header.
 
 use super::{DbAddress, Page, PageHeader, PageType, PAGE_SIZE};
-use crate::data::SlottedArray;
 
 /// Number of buckets in a data page (256 = 2 nibbles of fanout).
 pub const BUCKET_COUNT: usize = 256;

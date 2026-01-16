@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::node::{Node, NodeHash, HASH_SIZE, EMPTY_ROOT, keccak256};
-use crate::data::NibblePath;
 
 /// Trie errors.
 #[derive(Error, Debug)]

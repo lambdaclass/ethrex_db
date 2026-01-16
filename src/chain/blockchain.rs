@@ -244,7 +244,7 @@ impl Blockchain {
     pub fn fork_choice_update(
         &self,
         head_hash: H256,
-        safe_hash: Option<H256>,
+        _safe_hash: Option<H256>,
         finalized_hash: Option<H256>,
     ) -> Result<()> {
         // Verify head exists
