@@ -1,10 +1,16 @@
 //! Page-based persistent storage.
 //!
 //! This module implements memory-mapped file storage with Copy-on-Write
-//! concurrency, inspired by LMDB.
+//! concurrency, inspired by LMDB and Paprika.
 
-// TODO: Implement in Phase 2
-// mod page;
-// mod data_page;
-// mod root_page;
-// mod paged_db;
+mod db_address;
+mod page;
+mod page_header;
+mod page_types;
+mod paged_db;
+
+pub use db_address::DbAddress;
+pub use page::{Page, PAGE_SIZE};
+pub use page_header::{PageHeader, PageType};
+pub use page_types::{DataPage, RootPage, LeafPage, AbandonedPage};
+pub use paged_db::{PagedDb, DbError, BatchContext, ReadOnlyBatch, CommitOptions};

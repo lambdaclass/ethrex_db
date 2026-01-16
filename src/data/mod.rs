@@ -3,5 +3,8 @@
 mod nibble_path;
 mod slotted_array;
 
+#[cfg(test)]
+mod tests;
+
 pub use nibble_path::NibblePath;
 pub use slotted_array::SlottedArray;

@@ -90,36 +90,41 @@ ethrex_db/
 └── tests/
 ```
 
-## Implementation Roadmap
+## Implementation Status
 
-### Phase 1: Foundation (Current)
+### Phase 1: Foundation ✅
 
-Core data structures without SIMD optimizations:
+Core data structures:
 - [x] NibblePath - trie path traversal
 - [x] SlottedArray - in-page key-value storage
-- [ ] Basic tests and property-based testing
+- [x] Property-based tests with proptest
 
-### Phase 2: Page-Based Storage
+### Phase 2: Page-Based Storage ✅
 
-- [ ] Page abstraction (4KB pages)
-- [ ] DataPage with fanout buckets
-- [ ] RootPage with metadata
-- [ ] PagedDb with memory-mapped files
-- [ ] Copy-on-Write concurrency
+- [x] Page abstraction (4KB pages)
+- [x] DataPage with fanout buckets
+- [x] RootPage with metadata
+- [x] LeafPage, AbandonedPage
+- [x] PagedDb with memory-mapped files
+- [x] Copy-on-Write concurrency
+- [x] Batch commit support
 
-### Phase 3: Blockchain Layer
+### Phase 3: Blockchain Layer ✅
 
-- [ ] Block abstraction
-- [ ] Blockchain for unfinalized state
-- [ ] FCU handling
-- [ ] Finalization triggers
+- [x] Block abstraction with parent chain
+- [x] WorldState trait for state access
+- [x] Blockchain for unfinalized state
+- [x] Parallel block creation
+- [x] FCU handling
+- [x] Finalization to PagedDb
 
-### Phase 4: Merkle Computation
+### Phase 4: Merkle Computation ✅
 
-- [ ] RLP encoding of trie nodes
-- [ ] Keccak hashing integration
-- [ ] Storage root computation
-- [ ] State root computation
+- [x] RLP encoding for Ethereum
+- [x] Keccak-256 hashing
+- [x] Merkle node types (Leaf, Extension, Branch)
+- [x] In-memory MerkleTrie
+- [x] Deterministic root hash computation
 
 ### Phase 5: Optimizations (Future)
 
