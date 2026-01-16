@@ -19,9 +19,17 @@ tempfile = "3.10"
 hex = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
+ethrex-trie = { git = "https://github.com/lambdaclass/ethrex", package = "ethrex-trie" }
+ethrex-rlp = { git = "https://github.com/lambdaclass/ethrex", package = "ethrex-rlp" }
+cita_trie = "4.0"
+hasher = "0.1"
 
 [[bench]]
 name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "trie_comparison"
 harness = false
 
 [[example]]
