@@ -244,6 +244,108 @@ impl Default for SlottedArray {
     }
 }
 
+/// Iterator over entries in a SlottedArray.
+///
+/// Returns (key, value) pairs for non-tombstone entries.
+pub struct SlottedArrayIter<'a> {
+    array: &'a SlottedArray,
+    index: usize,
+    seen_keys: std::collections::HashSet<Vec<u8>>,
+}
+
+impl<'a> Iterator for SlottedArrayIter<'a> {
+    type Item = (NibblePath, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let header = self.array.header();
+        let slot_count = header.slot_count as usize;
+
+        // Iterate from newest to oldest to handle overwrites correctly
+        // We track seen keys to skip older versions
+        while self.index < slot_count {
+            let slot_index = slot_count - 1 - self.index;
+            self.index += 1;
+
+            let slot = self.array.get_slot(HEADER_SIZE + slot_index * SLOT_SIZE);
+
+            // Skip tombstones
+            if slot.offset == 0 && slot.length == 0 {
+                continue;
+            }
+
+            let entry_start = slot.offset as usize;
+            let entry_end = entry_start + slot.length as usize;
+            let entry = &self.array.data[entry_start..entry_end];
+
+            // Decode key
+            if entry.is_empty() {
+                continue;
+            }
+
+            let key_len = entry[0] as usize;
+            let key_bytes_len = (key_len + 1) / 2;
+            if 1 + key_bytes_len > entry.len() {
+                continue;
+            }
+
+            let key_bytes = &entry[1..1 + key_bytes_len];
+
+            // Skip if we've already seen this key (newer version exists)
+            if self.seen_keys.contains(key_bytes) {
+                continue;
+            }
+            self.seen_keys.insert(key_bytes.to_vec());
+
+            // Decode the NibblePath
+            let path = Self::decode_nibble_path(key_len, key_bytes);
+
+            // Extract value
+            let value = entry[1 + key_bytes_len..].to_vec();
+
+            return Some((path, value));
+        }
+
+        None
+    }
+}
+
+impl<'a> SlottedArrayIter<'a> {
+    fn decode_nibble_path(nibble_count: usize, bytes: &[u8]) -> NibblePath {
+        // Reconstruct the original bytes from packed nibbles
+        let mut original_bytes = Vec::with_capacity((nibble_count + 1) / 2);
+        for byte in bytes {
+            original_bytes.push(*byte);
+        }
+
+        // Create a NibblePath with the correct length
+        let mut path = NibblePath::from_bytes(&original_bytes);
+        // Truncate if nibble_count is odd
+        if nibble_count % 2 == 1 && !original_bytes.is_empty() {
+            path = path.slice_to(nibble_count);
+        }
+        path
+    }
+}
+
+impl SlottedArray {
+    /// Returns an iterator over all entries in the array.
+    ///
+    /// Entries are returned in reverse insertion order (newest first).
+    /// Tombstones are skipped, and for duplicate keys, only the newest value is returned.
+    pub fn iter(&self) -> SlottedArrayIter<'_> {
+        SlottedArrayIter {
+            array: self,
+            index: 0,
+            seen_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Returns the number of live (non-tombstone) entries.
+    pub fn live_count(&self) -> usize {
+        self.iter().count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +400,82 @@ mod tests {
             let expected = format!("value_{}", i);
             assert_eq!(arr.get(&key), Some(expected.into_bytes()));
         }
+    }
+
+    #[test]
+    fn test_iterator() {
+        let mut arr = SlottedArray::new();
+
+        // Insert 5 entries
+        for i in 0..5u8 {
+            let key = NibblePath::from_bytes(&[i, i + 10]);
+            let value = format!("value_{}", i);
+            arr.try_insert(&key, value.as_bytes());
+        }
+
+        // Iterate and collect entries
+        let entries: Vec<_> = arr.iter().collect();
+        assert_eq!(entries.len(), 5);
+
+        // Verify all values are present (order may vary due to newest-first)
+        let values: std::collections::HashSet<_> = entries.iter()
+            .map(|(_, v)| String::from_utf8(v.clone()).unwrap())
+            .collect();
+        for i in 0..5 {
+            assert!(values.contains(&format!("value_{}", i)));
+        }
+    }
+
+    #[test]
+    fn test_iterator_with_overwrites() {
+        let mut arr = SlottedArray::new();
+        let key = NibblePath::from_bytes(&[0xAB, 0xCD]);
+
+        // Insert, overwrite, insert again
+        arr.try_insert(&key, b"first");
+        arr.try_insert(&key, b"second");
+        arr.try_insert(&key, b"third");
+
+        // Iterator should only return the newest value
+        let entries: Vec<_> = arr.iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, b"third".to_vec());
+    }
+
+    #[test]
+    fn test_iterator_with_deletes() {
+        let mut arr = SlottedArray::new();
+
+        // Insert 3 entries
+        for i in 0..3u8 {
+            let key = NibblePath::from_bytes(&[i]);
+            arr.try_insert(&key, format!("val{}", i).as_bytes());
+        }
+
+        // Delete middle entry
+        let key1 = NibblePath::from_bytes(&[1]);
+        arr.delete(&key1);
+
+        // Iterator should return only 2 entries
+        let entries: Vec<_> = arr.iter().collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_live_count() {
+        let mut arr = SlottedArray::new();
+
+        for i in 0..5u8 {
+            let key = NibblePath::from_bytes(&[i]);
+            arr.try_insert(&key, b"value");
+        }
+
+        assert_eq!(arr.live_count(), 5);
+
+        // Delete one
+        let key = NibblePath::from_bytes(&[2]);
+        arr.delete(&key);
+
+        assert_eq!(arr.live_count(), 4);
     }
 }

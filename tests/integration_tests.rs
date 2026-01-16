@@ -705,3 +705,97 @@ fn test_e2e_trie_edge_cases() {
     assert!(trie.is_empty());
     assert_eq!(trie.root_hash(), EMPTY_ROOT);
 }
+
+#[test]
+fn test_e2e_state_persistence() {
+    // Test full state persistence: create blocks, finalize, and verify state root
+    let db = PagedDb::in_memory(1000).unwrap();
+    let blockchain = Blockchain::new(db);
+
+    // Create and commit several blocks with state changes
+    let genesis_hash = blockchain.last_finalized_hash();
+
+    // Block 1: Create two accounts
+    let mut block1 = blockchain.start_new(genesis_hash, H256::from_low_u64_be(1), 1).unwrap();
+    let addr1 = H256::repeat_byte(0x01);
+    let addr2 = H256::repeat_byte(0x02);
+    block1.set_account(addr1, Account::with_balance(U256::from(1000)));
+    block1.set_account(addr2, Account::with_balance(U256::from(2000)));
+    blockchain.commit(block1).unwrap();
+
+    // Block 2: Update account 1, add storage to account 2
+    let mut block2 = blockchain.start_new(H256::from_low_u64_be(1), H256::from_low_u64_be(2), 2).unwrap();
+    block2.set_account(addr1, Account::with_balance(U256::from(900)));
+    block2.set_storage(addr2, H256::repeat_byte(0xAA), U256::from(42));
+    blockchain.commit(block2).unwrap();
+
+    // Block 3: More storage changes
+    let mut block3 = blockchain.start_new(H256::from_low_u64_be(2), H256::from_low_u64_be(3), 3).unwrap();
+    block3.set_storage(addr2, H256::repeat_byte(0xBB), U256::from(100));
+    block3.set_storage(addr2, H256::repeat_byte(0xCC), U256::from(200));
+    blockchain.commit(block3).unwrap();
+
+    // Before finalization, state root should be empty (no finalized state)
+    let initial_root = blockchain.state_root();
+    assert_eq!(initial_root, EMPTY_ROOT);
+
+    // Finalize block 3 (which includes blocks 1, 2, and 3)
+    blockchain.finalize(H256::from_low_u64_be(3)).unwrap();
+
+    // After finalization, state root should change
+    let final_root = blockchain.state_root();
+    assert_ne!(final_root, EMPTY_ROOT);
+
+    // Query finalized state
+    let addr1_bytes: [u8; 20] = addr1.as_bytes()[12..32].try_into().unwrap();
+    let account1 = blockchain.get_finalized_account(&addr1_bytes);
+    assert!(account1.is_some());
+    assert_eq!(account1.unwrap().balance, U256::from(900));
+
+    // Verify finalization state
+    assert_eq!(blockchain.last_finalized_number(), 3);
+    assert_eq!(blockchain.committed_count(), 0);
+}
+
+#[test]
+fn test_e2e_incremental_finalization() {
+    // Test incremental finalization (finalize block by block)
+    let db = PagedDb::in_memory(1000).unwrap();
+    let blockchain = Blockchain::new(db);
+
+    let genesis_hash = blockchain.last_finalized_hash();
+
+    // Create 5 blocks
+    let mut prev_hash = genesis_hash;
+    for i in 1..=5 {
+        let mut block = blockchain.start_new(prev_hash, H256::from_low_u64_be(i), i).unwrap();
+        let addr = H256::from_low_u64_be(i * 100);
+        block.set_account(addr, Account::with_balance(U256::from(i * 1000)));
+        blockchain.commit(block).unwrap();
+        prev_hash = H256::from_low_u64_be(i);
+    }
+
+    // Finalize block 2
+    blockchain.finalize(H256::from_low_u64_be(2)).unwrap();
+    assert_eq!(blockchain.last_finalized_number(), 2);
+    assert_eq!(blockchain.committed_count(), 3); // blocks 3, 4, 5 remain
+
+    let root_after_2 = blockchain.state_root();
+    assert_ne!(root_after_2, EMPTY_ROOT);
+
+    // Finalize block 4
+    blockchain.finalize(H256::from_low_u64_be(4)).unwrap();
+    assert_eq!(blockchain.last_finalized_number(), 4);
+    assert_eq!(blockchain.committed_count(), 1); // block 5 remains
+
+    let root_after_4 = blockchain.state_root();
+    assert_ne!(root_after_4, root_after_2); // Root should change with more state
+
+    // Finalize block 5
+    blockchain.finalize(H256::from_low_u64_be(5)).unwrap();
+    assert_eq!(blockchain.last_finalized_number(), 5);
+    assert_eq!(blockchain.committed_count(), 0);
+
+    let root_after_5 = blockchain.state_root();
+    assert_ne!(root_after_5, root_after_4);
+}
