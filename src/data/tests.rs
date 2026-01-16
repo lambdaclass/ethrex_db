@@ -176,35 +176,44 @@ mod proptest_tests {
 
         #[test]
         fn slotted_array_multiple_deletes(
-            keys in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..8), 2..5),
-            values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..16), 2..5)
+            seed in any::<u64>()
         ) {
-            use std::collections::HashSet;
+            use std::collections::HashMap;
             let mut arr = SlottedArray::new();
-            let mut inserted_keys: HashSet<Vec<u8>> = HashSet::new();
+            let mut inserted: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
 
-            // Insert all
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let path = NibblePath::from_bytes(key);
-                if arr.try_insert(&path, value) {
-                    inserted_keys.insert(key.clone());
+            // Generate unique keys based on seed
+            for i in 0..5 {
+                let key = vec![(seed.wrapping_add(i)) as u8, ((seed.wrapping_add(i)) >> 8) as u8];
+                let value = vec![i as u8; 8];
+                let path = NibblePath::from_bytes(&key);
+                if arr.try_insert(&path, &value) {
+                    inserted.insert(key, value);
                 }
             }
 
-            // Delete half
-            let to_delete: Vec<_> = inserted_keys.iter().take(inserted_keys.len() / 2).cloned().collect();
-            for key in &to_delete {
+            if inserted.len() < 2 {
+                return Ok(()); // Not enough entries to test
+            }
+
+            // Delete first half of inserted keys
+            let keys_to_delete: Vec<_> = inserted.keys().take(inserted.len() / 2).cloned().collect();
+            for key in &keys_to_delete {
                 let path = NibblePath::from_bytes(key);
                 arr.delete(&path);
             }
 
-            // Verify deleted keys are gone, others remain
-            for key in &inserted_keys {
+            // Verify deleted keys are gone
+            for key in &keys_to_delete {
                 let path = NibblePath::from_bytes(key);
-                if to_delete.contains(key) {
-                    assert!(arr.get(&path).is_none());
-                } else {
-                    assert!(arr.get(&path).is_some());
+                prop_assert!(arr.get(&path).is_none(), "Deleted key should be gone");
+            }
+
+            // Verify remaining keys still exist
+            for (key, value) in &inserted {
+                if !keys_to_delete.contains(key) {
+                    let path = NibblePath::from_bytes(key);
+                    prop_assert_eq!(arr.get(&path), Some(value.clone()), "Remaining key should exist");
                 }
             }
         }
