@@ -13,6 +13,7 @@ primitive-types = "0.12"
 parking_lot = "0.12"
 thiserror = "1.0"
 wide = "0.7"  # Used in benchmarks for SIMD comparison
+rayon = "1.10"  # Parallel Merkle computation
 
 [dev-dependencies]
 proptest = "1.4"

@@ -1,6 +1,10 @@
 //! Merkle Patricia Trie implementation.
+//!
+//! This module provides both sequential and parallel Merkle computation.
+//! The parallel version uses Rayon to compute branch node children concurrently.
 
 use std::collections::HashMap;
+use rayon::prelude::*;
 use thiserror::Error;
 
 use super::node::{Node, NodeHash, HASH_SIZE, EMPTY_ROOT, keccak256};
@@ -203,6 +207,139 @@ impl MerkleTrie {
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         self.data.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
+
+    /// Clears the root hash cache, forcing recomputation on next root_hash() call.
+    ///
+    /// This is useful for benchmarking to measure computation time without caching.
+    pub fn clear_cache(&mut self) {
+        self.root_cache = None;
+    }
+
+    /// Computes the root hash in parallel.
+    ///
+    /// Uses Rayon to parallelize branch node child computation.
+    /// For tries with many entries, this can provide significant speedup
+    /// on multi-core systems.
+    pub fn parallel_root_hash(&mut self) -> [u8; HASH_SIZE] {
+        if let Some(cached) = self.root_cache {
+            return cached;
+        }
+
+        let hash = self.compute_root_parallel();
+        self.root_cache = Some(hash);
+        hash
+    }
+
+    /// Computes the root hash in parallel without caching.
+    fn compute_root_parallel(&self) -> [u8; HASH_SIZE] {
+        if self.data.is_empty() {
+            return EMPTY_ROOT;
+        }
+
+        // Convert keys to nibble paths
+        let mut entries: Vec<(Vec<u8>, &[u8])> = self.data
+            .iter()
+            .map(|(k, v)| {
+                let nibbles = key_to_nibbles(k);
+                (nibbles, v.as_slice())
+            })
+            .collect();
+
+        // Sort by nibble path for deterministic ordering
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Build trie recursively with parallel branch computation
+        let node = self.build_node_parallel(&entries, 0);
+        node.keccak()
+    }
+
+    /// Builds a trie node from sorted entries, using parallel computation for branches.
+    ///
+    /// When the number of entries exceeds a threshold, branch children are computed
+    /// in parallel using Rayon.
+    fn build_node_parallel(&self, entries: &[(Vec<u8>, &[u8])], depth: usize) -> Node {
+        if entries.is_empty() {
+            return Node::Empty;
+        }
+
+        if entries.len() == 1 {
+            // Single entry - create a leaf
+            let (nibbles, value) = &entries[0];
+            let remaining: Vec<u8> = nibbles[depth..].to_vec();
+            return Node::leaf(remaining, value.to_vec());
+        }
+
+        // Check for common prefix
+        let common_prefix = self.find_common_prefix(entries, depth);
+
+        if common_prefix > 0 {
+            // Create extension node
+            let prefix: Vec<u8> = entries[0].0[depth..depth + common_prefix].to_vec();
+            let child_node = self.build_node_parallel(entries, depth + common_prefix);
+            let child_hash = child_node.keccak();
+            return Node::extension(prefix, child_hash);
+        }
+
+        // Create branch node
+        let mut branch_value: Option<Vec<u8>> = None;
+
+        // Group entries by first nibble at current depth
+        let mut groups: [Vec<(Vec<u8>, &[u8])>; 16] = Default::default();
+
+        for (nibbles, value) in entries {
+            if depth >= nibbles.len() {
+                // This entry's key ends here - it's the branch value
+                branch_value = Some(value.to_vec());
+            } else {
+                let nibble = nibbles[depth] as usize;
+                groups[nibble].push((nibbles.clone(), *value));
+            }
+        }
+
+        // Build child nodes in parallel if we have enough entries
+        let total_entries: usize = groups.iter().map(|g| g.len()).sum();
+        let children: Box<[Option<[u8; HASH_SIZE]>; 16]> = if total_entries > 64 {
+            // Parallel computation for large branches
+            let child_hashes: Vec<Option<[u8; HASH_SIZE]>> = groups
+                .par_iter()
+                .map(|group| {
+                    if group.is_empty() {
+                        None
+                    } else {
+                        let child_node = self.build_node_parallel(group, depth + 1);
+                        match child_node.hash() {
+                            NodeHash::Hash(h) => Some(h),
+                            NodeHash::Inline(data) => Some(keccak256(&data)),
+                        }
+                    }
+                })
+                .collect();
+
+            let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+            for (i, hash) in child_hashes.into_iter().enumerate() {
+                children[i] = hash;
+            }
+            children
+        } else {
+            // Sequential computation for small branches
+            let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+            for (i, group) in groups.iter().enumerate() {
+                if !group.is_empty() {
+                    let child_node = self.build_node_parallel(group, depth + 1);
+                    match child_node.hash() {
+                        NodeHash::Hash(h) => children[i] = Some(h),
+                        NodeHash::Inline(data) => children[i] = Some(keccak256(&data)),
+                    }
+                }
+            }
+            children
+        };
+
+        Node::Branch {
+            children,
+            value: branch_value,
+        }
+    }
 }
 
 impl Default for MerkleTrie {
@@ -306,5 +443,74 @@ mod tests {
 
         assert_ne!(hash1, hash2);
         assert_eq!(trie.get(b"key"), Some(b"value2".as_slice()));
+    }
+
+    #[test]
+    fn test_parallel_empty_trie() {
+        let mut trie = MerkleTrie::new();
+        assert_eq!(trie.parallel_root_hash(), EMPTY_ROOT);
+    }
+
+    #[test]
+    fn test_parallel_single_entry() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(b"key", b"value".to_vec());
+
+        // Sequential and parallel should produce the same hash
+        let seq_hash = trie.root_hash();
+        trie.clear_cache();
+        let par_hash = trie.parallel_root_hash();
+
+        assert_eq!(seq_hash, par_hash);
+    }
+
+    #[test]
+    fn test_parallel_multiple_entries() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(b"do", b"verb".to_vec());
+        trie.insert(b"dog", b"puppy".to_vec());
+        trie.insert(b"doge", b"coin".to_vec());
+        trie.insert(b"horse", b"stallion".to_vec());
+
+        let seq_hash = trie.root_hash();
+        trie.clear_cache();
+        let par_hash = trie.parallel_root_hash();
+
+        assert_eq!(seq_hash, par_hash);
+    }
+
+    #[test]
+    fn test_parallel_large_trie() {
+        let mut trie = MerkleTrie::new();
+
+        // Insert 200 entries to exercise parallel code path (threshold is 64)
+        for i in 0..200u32 {
+            let key = i.to_be_bytes();
+            let value = format!("value_{}", i).into_bytes();
+            trie.insert(&key, value);
+        }
+
+        let seq_hash = trie.root_hash();
+        trie.clear_cache();
+        let par_hash = trie.parallel_root_hash();
+
+        assert_eq!(seq_hash, par_hash);
+    }
+
+    #[test]
+    fn test_parallel_deterministic() {
+        let mut trie1 = MerkleTrie::new();
+        let mut trie2 = MerkleTrie::new();
+
+        // Insert 100 entries in different orders
+        for i in 0..100u32 {
+            trie1.insert(&i.to_be_bytes(), format!("v{}", i).into_bytes());
+        }
+        for i in (0..100u32).rev() {
+            trie2.insert(&i.to_be_bytes(), format!("v{}", i).into_bytes());
+        }
+
+        // Both should produce the same hash
+        assert_eq!(trie1.parallel_root_hash(), trie2.parallel_root_hash());
     }
 }

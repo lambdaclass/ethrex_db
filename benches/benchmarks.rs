@@ -242,6 +242,43 @@ fn bench_merkle_trie(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark parallel vs sequential Merkle computation
+fn bench_parallel_merkle(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Parallel_Merkle");
+
+    for size in [100, 1000, 10000].iter() {
+        // Create a trie with many entries
+        let keys: Vec<_> = (0..*size).map(|i: u32| keccak256(&i.to_be_bytes())).collect();
+        let values: Vec<_> = (0..*size).map(|i: u32| vec![i as u8; 64]).collect();
+
+        // Sequential root hash
+        group.bench_with_input(BenchmarkId::new("sequential", size), size, |b, _| {
+            let mut trie = MerkleTrie::new();
+            for (key, value) in keys.iter().zip(values.iter()) {
+                trie.insert(key, value.clone());
+            }
+            b.iter(|| {
+                trie.clear_cache();
+                trie.root_hash()
+            })
+        });
+
+        // Parallel root hash
+        group.bench_with_input(BenchmarkId::new("parallel", size), size, |b, _| {
+            let mut trie = MerkleTrie::new();
+            for (key, value) in keys.iter().zip(values.iter()) {
+                trie.insert(key, value.clone());
+            }
+            b.iter(|| {
+                trie.clear_cache();
+                trie.parallel_root_hash()
+            })
+        });
+    }
+
+    group.finish();
+}
+
 /// Benchmark keccak256
 fn bench_keccak(c: &mut Criterion) {
     let mut group = c.benchmark_group("Keccak256");
@@ -351,6 +388,7 @@ criterion_group!(
     bench_simd_comparison,
     bench_slotted_array_lookup,
     bench_merkle_trie,
+    bench_parallel_merkle,
     bench_keccak,
     bench_state_trie,
     bench_paged_db,
