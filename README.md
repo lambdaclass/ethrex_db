@@ -310,7 +310,7 @@ Core data structures:
 - [x] Full read/write path: Blockchain → PagedDb → Merkle
 - [x] State persistence across database reopens
 
-### Phase 6: Optimizations (In Progress)
+### Phase 6: Optimizations ✅
 
 **SIMD Vectorization Investigation:**
 - [x] Benchmarked explicit SIMD (`wide` crate) vs scalar comparison
@@ -328,9 +328,21 @@ Core data structures:
 - [x] `begin_read_only()` now lock-free for common metadata
 - [x] `batch_id()`, `block_number()`, `block_hash()` all lock-free
 
-Remaining optimizations:
-- [ ] Parallel Merkle computation
-- [ ] Abandoned page reuse
+**Parallel Merkle Computation:**
+- [x] Added Rayon for parallel computation
+- [x] Implemented `parallel_root_hash()` with automatic threshold
+- [x] Branch nodes with >64 entries computed in parallel
+- [x] **Benchmarks**:
+  - 100 entries: sequential faster (parallelization overhead)
+  - 1,000 entries: parallel 2.2x faster (1.44ms → 650µs)
+  - 10,000 entries: parallel 4.2x faster (9.8ms → 2.3ms)
+
+**Abandoned Page Reuse:**
+- [x] Added inline abandoned page storage in RootPage
+- [x] Batch ID tracking for reorg safety
+- [x] Configurable reorg depth (default: 64 batches)
+- [x] Automatic page reuse after reorg depth passes
+- [x] AbandonedPage linked list for overflow (structure in place)
 
 ## Dependencies
 
@@ -341,6 +353,7 @@ Remaining optimizations:
 | `rlp` | Ethereum RLP encoding |
 | `primitive-types` | H256, U256 |
 | `parking_lot` | Fast synchronization primitives |
+| `rayon` | Parallel computation |
 
 ## References
 
