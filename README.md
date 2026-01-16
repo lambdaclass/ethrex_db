@@ -126,12 +126,49 @@ Core data structures:
 - [x] In-memory MerkleTrie
 - [x] Deterministic root hash computation
 
-### Phase 5: Optimizations (Future)
+### Phase 5: Integration (Next)
+
+Connect the individual components into a working system:
+- [ ] Store trie nodes in DataPage/LeafPage
+- [ ] Load trie nodes from PagedDb on demand
+- [ ] Integrate MerkleTrie with PagedDb storage
+- [ ] Account storage tries (nested tries per account)
+- [ ] State root computation in Blockchain finalization
+- [ ] Full read/write path: Blockchain → PagedDb → Merkle
+
+### Phase 6: Optimizations (Future)
 
 - [ ] SIMD vectorization for SlottedArray search
 - [ ] Lock-free readers
 - [ ] Parallel Merkle computation
 - [ ] Abandoned page reuse
+
+## Testing
+
+Run the test suite:
+
+```bash
+cargo test
+```
+
+The project includes:
+- **76 tests** (68 unit + 8 integration)
+- **Property-based tests** using `proptest` for NibblePath, SlottedArray, and MerkleTrie
+- **Integration tests** in `tests/integration_tests.rs`
+
+## Current State
+
+The individual components are implemented and tested:
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| NibblePath | ✅ Working | Full nibble operations, slicing, comparison |
+| SlottedArray | ✅ Working | Insert, lookup, delete, defragmentation |
+| PagedDb | ✅ Working | Memory-mapped COW storage, batch commits |
+| Blockchain | ✅ Working | Block creation, FCU, finalization |
+| MerkleTrie | ✅ Working | In-memory trie, deterministic root hashes |
+
+**Not yet integrated**: The MerkleTrie operates in-memory independently from PagedDb. A production system needs Phase 5 to connect these components.
 
 ## Dependencies
 

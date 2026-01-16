@@ -133,11 +133,15 @@ impl SlottedArray {
     /// Looks up a value by key.
     ///
     /// Returns `Some(value)` if found, `None` if not present.
+    /// Searches from the end (newest entries first) so that newer inserts
+    /// take precedence over older ones with the same key.
     pub fn get(&self, key: &NibblePath) -> Option<Vec<u8>> {
         let key_bytes = self.encode_key(key);
         let header = self.header();
+        let slot_count = header.slot_count as usize;
 
-        for i in 0..header.slot_count as usize {
+        // Search from newest to oldest (end to start)
+        for i in (0..slot_count).rev() {
             let slot = self.get_slot(HEADER_SIZE + i * SLOT_SIZE);
 
             // Skip tombstones (offset == 0 and length == 0)
@@ -161,12 +165,15 @@ impl SlottedArray {
 
     /// Marks an entry as deleted (tombstone).
     ///
+    /// Deletes the most recent entry with the given key (searches from end).
     /// Returns `true` if the key was found and deleted.
     pub fn delete(&mut self, key: &NibblePath) -> bool {
         let key_bytes = self.encode_key(key);
         let header = self.header();
+        let slot_count = header.slot_count as usize;
 
-        for i in 0..header.slot_count as usize {
+        // Search from newest to oldest (end to start)
+        for i in (0..slot_count).rev() {
             let slot_offset = HEADER_SIZE + i * SLOT_SIZE;
             let slot = self.get_slot(slot_offset);
 

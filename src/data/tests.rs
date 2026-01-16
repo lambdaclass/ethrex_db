@@ -48,22 +48,25 @@ mod proptest_tests {
             keys in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..8), 1..10),
             values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..32), 1..10)
         ) {
+            use std::collections::HashMap;
             let mut arr = SlottedArray::new();
 
-            // Insert entries
-            let entries: Vec<_> = keys.iter().zip(values.iter()).collect();
+            // Track the last value for each key (later inserts overwrite)
+            let mut expected: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
 
-            for (key, value) in &entries {
+            // Insert entries
+            for (key, value) in keys.iter().zip(values.iter()) {
                 let path = NibblePath::from_bytes(key);
-                let _ = arr.try_insert(&path, value);
+                if arr.try_insert(&path, value) {
+                    expected.insert(key.clone(), value.clone());
+                }
             }
 
-            // Verify entries that were successfully inserted
-            for (key, value) in &entries {
+            // Verify entries match the last successfully inserted value for each key
+            for (key, expected_value) in &expected {
                 let path = NibblePath::from_bytes(key);
-                if let Some(retrieved) = arr.get(&path) {
-                    assert_eq!(&retrieved, *value);
-                }
+                let retrieved = arr.get(&path);
+                assert_eq!(retrieved, Some(expected_value.clone()));
             }
         }
 
