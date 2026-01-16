@@ -224,16 +224,6 @@ fn key_to_nibbles(key: &[u8]) -> Vec<u8> {
     nibbles
 }
 
-/// Converts nibbles back to bytes.
-fn nibbles_to_key(nibbles: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity((nibbles.len() + 1) / 2);
-    for chunk in nibbles.chunks(2) {
-        let byte = (chunk[0] << 4) | chunk.get(1).copied().unwrap_or(0);
-        key.push(byte);
-    }
-    key
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,12 +296,6 @@ mod tests {
     fn test_key_to_nibbles() {
         let nibbles = key_to_nibbles(&[0xAB, 0xCD]);
         assert_eq!(nibbles, vec![0xA, 0xB, 0xC, 0xD]);
-    }
-
-    #[test]
-    fn test_nibbles_to_key() {
-        let key = nibbles_to_key(&[0xA, 0xB, 0xC, 0xD]);
-        assert_eq!(key, vec![0xAB, 0xCD]);
     }
 
     #[test]

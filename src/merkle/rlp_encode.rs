@@ -186,50 +186,6 @@ impl Default for RlpEncoder {
     }
 }
 
-/// Decodes the length from RLP header.
-pub fn decode_length(data: &[u8]) -> Option<(usize, usize)> {
-    if data.is_empty() {
-        return None;
-    }
-
-    let prefix = data[0];
-
-    if prefix < 0x80 {
-        // Single byte
-        Some((0, 1))
-    } else if prefix <= 0xb7 {
-        // Short string
-        let len = (prefix - 0x80) as usize;
-        Some((1, len))
-    } else if prefix <= 0xbf {
-        // Long string
-        let len_of_len = (prefix - 0xb7) as usize;
-        if data.len() < 1 + len_of_len {
-            return None;
-        }
-        let mut len = 0usize;
-        for i in 0..len_of_len {
-            len = (len << 8) | data[1 + i] as usize;
-        }
-        Some((1 + len_of_len, len))
-    } else if prefix <= 0xf7 {
-        // Short list
-        let len = (prefix - 0xc0) as usize;
-        Some((1, len))
-    } else {
-        // Long list
-        let len_of_len = (prefix - 0xf7) as usize;
-        if data.len() < 1 + len_of_len {
-            return None;
-        }
-        let mut len = 0usize;
-        for i in 0..len_of_len {
-            len = (len << 8) | data[1 + i] as usize;
-        }
-        Some((1 + len_of_len, len))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
