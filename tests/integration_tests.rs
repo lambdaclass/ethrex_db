@@ -2,8 +2,8 @@
 
 use ethrex_db::data::{NibblePath, SlottedArray};
 use ethrex_db::store::{PagedDb, PageType, CommitOptions};
-use ethrex_db::chain::{Blockchain, Block, Account, WorldState, ReadOnlyWorldState};
-use ethrex_db::merkle::{MerkleTrie, Node, keccak256, EMPTY_ROOT};
+use ethrex_db::chain::{Blockchain, Account, WorldState};
+use ethrex_db::merkle::{MerkleTrie, keccak256, EMPTY_ROOT};
 use primitive_types::{H256, U256};
 
 #[test]

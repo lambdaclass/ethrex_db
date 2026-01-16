@@ -34,8 +34,6 @@ pub type Result<T> = std::result::Result<T, BlockchainError>;
 /// Internal block state for committed blocks.
 struct CommittedBlock {
     block: Block,
-    /// Reference count for this block.
-    ref_count: usize,
 }
 
 /// The blockchain manager.
@@ -126,10 +124,7 @@ impl Blockchain {
         }
 
         // Add to hash index
-        blocks_by_hash.insert(hash, CommittedBlock {
-            block,
-            ref_count: 1,
-        });
+        blocks_by_hash.insert(hash, CommittedBlock { block });
 
         // Add to number index
         blocks_by_number
@@ -275,7 +270,6 @@ use super::world_state::ReadOnlyWorldState;
 mod tests {
     use super::*;
     use crate::store::PagedDb;
-    use primitive_types::U256;
 
     fn create_test_blockchain() -> Blockchain {
         let db = PagedDb::in_memory(1000).unwrap();

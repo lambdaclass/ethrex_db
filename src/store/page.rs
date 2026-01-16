@@ -7,9 +7,6 @@ use super::page_header::PageHeader;
 /// Page size in bytes (4KB).
 pub const PAGE_SIZE: usize = 4096;
 
-/// Payload size (page size minus header).
-pub const PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE;
-
 /// A raw page in the database.
 ///
 /// This is a thin wrapper around a byte array representing a 4KB page.
@@ -95,94 +92,6 @@ impl std::fmt::Debug for Page {
     }
 }
 
-/// A reference to a page in memory-mapped storage.
-///
-/// This provides zero-copy access to page data.
-pub struct PageRef<'a> {
-    data: &'a [u8; PAGE_SIZE],
-}
-
-impl<'a> PageRef<'a> {
-    /// Creates a page reference from a byte slice.
-    ///
-    /// # Safety
-    /// The slice must be exactly PAGE_SIZE bytes and properly aligned.
-    pub unsafe fn from_slice(data: &'a [u8]) -> Self {
-        debug_assert!(data.len() >= PAGE_SIZE);
-        Self {
-            data: &*(data.as_ptr() as *const [u8; PAGE_SIZE]),
-        }
-    }
-
-    /// Returns the raw bytes.
-    pub fn as_bytes(&self) -> &[u8; PAGE_SIZE] {
-        self.data
-    }
-
-    /// Returns the page header.
-    pub fn header(&self) -> PageHeader {
-        PageHeader::read(self.data)
-    }
-
-    /// Returns the payload.
-    pub fn payload(&self) -> &[u8] {
-        &self.data[PageHeader::SIZE..]
-    }
-}
-
-/// A mutable reference to a page in memory-mapped storage.
-pub struct PageMut<'a> {
-    data: &'a mut [u8; PAGE_SIZE],
-}
-
-impl<'a> PageMut<'a> {
-    /// Creates a mutable page reference from a byte slice.
-    ///
-    /// # Safety
-    /// The slice must be exactly PAGE_SIZE bytes and properly aligned.
-    pub unsafe fn from_slice(data: &'a mut [u8]) -> Self {
-        debug_assert!(data.len() >= PAGE_SIZE);
-        Self {
-            data: &mut *(data.as_mut_ptr() as *mut [u8; PAGE_SIZE]),
-        }
-    }
-
-    /// Returns the raw bytes.
-    pub fn as_bytes(&self) -> &[u8; PAGE_SIZE] {
-        self.data
-    }
-
-    /// Returns mutable raw bytes.
-    pub fn as_bytes_mut(&mut self) -> &mut [u8; PAGE_SIZE] {
-        self.data
-    }
-
-    /// Returns the page header.
-    pub fn header(&self) -> PageHeader {
-        PageHeader::read(self.data)
-    }
-
-    /// Sets the page header.
-    pub fn set_header(&mut self, header: PageHeader) {
-        header.write(self.data);
-    }
-
-    /// Returns the payload.
-    pub fn payload(&self) -> &[u8] {
-        &self.data[PageHeader::SIZE..]
-    }
-
-    /// Returns mutable payload.
-    pub fn payload_mut(&mut self) -> &mut [u8] {
-        &mut self.data[PageHeader::SIZE..]
-    }
-
-    /// Clears the page.
-    pub fn clear(&mut self) {
-        self.data.fill(0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +120,6 @@ mod tests {
     #[test]
     fn test_payload_size() {
         let page = Page::new();
-        assert_eq!(page.payload().len(), PAYLOAD_SIZE);
+        assert_eq!(page.payload().len(), PAGE_SIZE - PageHeader::SIZE);
     }
 }

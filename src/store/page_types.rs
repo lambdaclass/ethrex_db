@@ -7,9 +7,6 @@ use super::{DbAddress, Page, PageHeader, PageType, PAGE_SIZE};
 /// Number of buckets in a data page (256 = 2 nibbles of fanout).
 pub const BUCKET_COUNT: usize = 256;
 
-/// Number of buckets for non-fanout pages (16 = 1 nibble).
-pub const SMALL_BUCKET_COUNT: usize = 16;
-
 // ============================================================================
 // RootPage - Database metadata
 // ============================================================================
@@ -186,8 +183,6 @@ impl DataPage {
     const CHILD_BITMAP_OFFSET: usize = Self::MERKLE_OFFSET + DbAddress::SIZE;
     /// Offset where data storage starts.
     const DATA_OFFSET: usize = Self::CHILD_BITMAP_OFFSET + 4;
-    /// Size of data storage area.
-    const DATA_SIZE: usize = PAGE_SIZE - Self::DATA_OFFSET;
 
     /// Creates a new data page.
     pub fn new(batch_id: u32, level: u8) -> Self {

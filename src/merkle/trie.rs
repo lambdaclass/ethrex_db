@@ -16,9 +16,6 @@ pub enum TrieError {
     Corrupted,
 }
 
-/// Result type for trie operations.
-pub type Result<T> = std::result::Result<T, TrieError>;
-
 /// A simple in-memory Merkle Patricia Trie.
 ///
 /// This implementation stores all nodes in memory and recomputes

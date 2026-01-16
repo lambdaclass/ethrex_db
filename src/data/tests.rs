@@ -44,6 +44,42 @@ mod proptest_tests {
         }
 
         #[test]
+        fn nibble_path_common_prefix_bounds(
+            bytes1 in proptest::collection::vec(any::<u8>(), 0..32),
+            bytes2 in proptest::collection::vec(any::<u8>(), 0..32)
+        ) {
+            let path1 = NibblePath::from_bytes(&bytes1);
+            let path2 = NibblePath::from_bytes(&bytes2);
+
+            let common = path1.common_prefix_len(&path2);
+            // Common prefix can't exceed the shorter path
+            prop_assert!(common <= path1.len());
+            prop_assert!(common <= path2.len());
+        }
+
+        #[test]
+        fn nibble_path_identical_full_common_prefix(bytes in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let path1 = NibblePath::from_bytes(&bytes);
+            let path2 = NibblePath::from_bytes(&bytes);
+
+            // Identical paths should have full common prefix
+            assert_eq!(path1.common_prefix_len(&path2), path1.len());
+        }
+
+        #[test]
+        fn nibble_path_slice_preserves_values(bytes in proptest::collection::vec(any::<u8>(), 2..32)) {
+            let path = NibblePath::from_bytes(&bytes);
+
+            // Slice at various points
+            for start in 0..path.len() {
+                let sliced = path.slice_from(start);
+                for i in 0..sliced.len() {
+                    prop_assert_eq!(sliced.get(i), path.get(start + i));
+                }
+            }
+        }
+
+        #[test]
         fn slotted_array_insert_get(
             keys in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..8), 1..10),
             values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..32), 1..10)
@@ -103,6 +139,72 @@ mod proptest_tests {
                 if arr.try_insert(&path, &value2) {
                     let retrieved = arr.get(&path);
                     assert_eq!(retrieved, Some(value2));
+                }
+            }
+        }
+
+        #[test]
+        fn slotted_array_update_overwrites(
+            key in proptest::collection::vec(any::<u8>(), 1..8),
+            value1 in proptest::collection::vec(any::<u8>(), 1..16),
+            value2 in proptest::collection::vec(any::<u8>(), 1..16)
+        ) {
+            let mut arr = SlottedArray::new();
+            let path = NibblePath::from_bytes(&key);
+
+            // Insert first value
+            if arr.try_insert(&path, &value1) {
+                // Insert second value (should update)
+                if arr.try_insert(&path, &value2) {
+                    // Should retrieve the second value
+                    let retrieved = arr.get(&path);
+                    assert_eq!(retrieved, Some(value2));
+                }
+            }
+        }
+
+        #[test]
+        fn slotted_array_delete_nonexistent_returns_false(
+            key in proptest::collection::vec(any::<u8>(), 1..8)
+        ) {
+            let mut arr = SlottedArray::new();
+            let path = NibblePath::from_bytes(&key);
+
+            // Deleting from empty array should return false
+            assert!(!arr.delete(&path));
+        }
+
+        #[test]
+        fn slotted_array_multiple_deletes(
+            keys in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..8), 2..5),
+            values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..16), 2..5)
+        ) {
+            use std::collections::HashSet;
+            let mut arr = SlottedArray::new();
+            let mut inserted_keys: HashSet<Vec<u8>> = HashSet::new();
+
+            // Insert all
+            for (key, value) in keys.iter().zip(values.iter()) {
+                let path = NibblePath::from_bytes(key);
+                if arr.try_insert(&path, value) {
+                    inserted_keys.insert(key.clone());
+                }
+            }
+
+            // Delete half
+            let to_delete: Vec<_> = inserted_keys.iter().take(inserted_keys.len() / 2).cloned().collect();
+            for key in &to_delete {
+                let path = NibblePath::from_bytes(key);
+                arr.delete(&path);
+            }
+
+            // Verify deleted keys are gone, others remain
+            for key in &inserted_keys {
+                let path = NibblePath::from_bytes(key);
+                if to_delete.contains(key) {
+                    assert!(arr.get(&path).is_none());
+                } else {
+                    assert!(arr.get(&path).is_some());
                 }
             }
         }
