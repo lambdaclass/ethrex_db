@@ -3,6 +3,10 @@
 //! Inspired by PostgreSQL's page layout, this structure stores variable-length
 //! entries in a fixed-size buffer by growing slots from the start and data
 //! from the end.
+//!
+//! Note: Benchmarks showed that Rust's built-in slice comparison already benefits
+//! from LLVM auto-vectorization, making explicit SIMD implementations unnecessary.
+//! The standard library's `starts_with` is already optimized.
 
 use super::NibblePath;
 
@@ -153,7 +157,7 @@ impl SlottedArray {
             let entry_end = entry_start + slot.length as usize;
             let entry = &self.data[entry_start..entry_end];
 
-            // Check if key matches
+            // Check if key matches (LLVM auto-vectorizes this comparison)
             if entry.starts_with(&key_bytes) {
                 let value_start = key_bytes.len();
                 return Some(entry[value_start..].to_vec());
@@ -477,5 +481,45 @@ mod tests {
         arr.delete(&key);
 
         assert_eq!(arr.live_count(), 4);
+    }
+
+    #[test]
+    fn test_long_keys() {
+        // Test with long keys (32 bytes -> 64 nibbles)
+        let mut arr = SlottedArray::new();
+
+        let long_key_bytes: Vec<u8> = (0..32).collect();
+        let key = NibblePath::from_bytes(&long_key_bytes);
+        let value = b"value for long key";
+
+        assert!(arr.try_insert(&key, value));
+        let retrieved = arr.get(&key);
+        assert_eq!(retrieved, Some(value.to_vec()));
+
+        // Test delete with long key
+        assert!(arr.delete(&key));
+        assert!(arr.get(&key).is_none());
+    }
+
+    #[test]
+    fn test_many_long_keys() {
+        // Test with many long keys
+        let mut arr = SlottedArray::new();
+
+        // Insert 20 entries with long keys
+        for i in 0..20u8 {
+            let key_bytes: Vec<u8> = (0..16).map(|j| i.wrapping_add(j)).collect();
+            let key = NibblePath::from_bytes(&key_bytes);
+            let value = format!("value_{}", i);
+            assert!(arr.try_insert(&key, value.as_bytes()));
+        }
+
+        // Retrieve all entries
+        for i in 0..20u8 {
+            let key_bytes: Vec<u8> = (0..16).map(|j| i.wrapping_add(j)).collect();
+            let key = NibblePath::from_bytes(&key_bytes);
+            let expected = format!("value_{}", i);
+            assert_eq!(arr.get(&key), Some(expected.into_bytes()));
+        }
     }
 }

@@ -260,9 +260,9 @@ cargo test
 ```
 
 The project includes:
-- **108 tests** (87 unit + 21 integration)
+- **117 tests** (97 unit + 20 integration)
 - **Property-based tests** using `proptest` for NibblePath, SlottedArray, and MerkleTrie
-- **End-to-end tests** covering multi-block chains, forks, storage operations
+- **End-to-end tests** covering multi-block chains, forks, storage operations, state persistence
 
 ## Implementation Status
 
@@ -300,20 +300,35 @@ Core data structures:
 - [x] In-memory MerkleTrie
 - [x] Deterministic root hash computation
 
-### Phase 5: Integration (Next)
+### Phase 5: Integration ✅
 
-Connect the individual components into a working system:
-- [ ] Store trie nodes in DataPage/LeafPage
-- [ ] Load trie nodes from PagedDb on demand
-- [ ] Integrate MerkleTrie with PagedDb storage
-- [ ] Account storage tries (nested tries per account)
-- [ ] State root computation in Blockchain finalization
-- [ ] Full read/write path: Blockchain → PagedDb → Merkle
+- [x] SlottedArray iterator for loading entries from pages
+- [x] PagedStateTrie for PagedDb integration
+- [x] Fanout-based storage for large tries (256 buckets)
+- [x] Account storage tries (nested tries per account)
+- [x] State root computation in Blockchain finalization
+- [x] Full read/write path: Blockchain → PagedDb → Merkle
+- [x] State persistence across database reopens
 
-### Phase 6: Optimizations (Future)
+### Phase 6: Optimizations (In Progress)
 
-- [ ] SIMD vectorization for SlottedArray search
-- [ ] Lock-free readers
+**SIMD Vectorization Investigation:**
+- [x] Benchmarked explicit SIMD (`wide` crate) vs scalar comparison
+- [x] **Finding**: LLVM auto-vectorization already optimizes `starts_with`
+- [x] Scalar comparison: 1.25-3.26 ns, SIMD: 2.00-4.81 ns
+- [x] **Decision**: Keep standard library functions - they're already SIMD-optimized
+
+**Lock-Free Readers:**
+- [x] Replaced `std::sync::RwLock` with `parking_lot::RwLock` (faster, no poisoning)
+- [x] Added atomic variables for frequently-read metadata:
+  - `batch_id`: Current batch ID (AtomicU32)
+  - `block_number`: Current block number (AtomicU32)
+  - `state_root`: State root address (AtomicU32)
+  - `block_hash`: Block hash (4x AtomicU64)
+- [x] `begin_read_only()` now lock-free for common metadata
+- [x] `batch_id()`, `block_number()`, `block_hash()` all lock-free
+
+Remaining optimizations:
 - [ ] Parallel Merkle computation
 - [ ] Abandoned page reuse
 

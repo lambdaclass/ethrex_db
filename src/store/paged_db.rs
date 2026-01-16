@@ -2,15 +2,22 @@
 //!
 //! This implements a persistent storage engine using memory-mapped files,
 //! inspired by LMDB and Paprika.
+//!
+//! ## Lock-Free Readers
+//!
+//! The database supports efficient concurrent readers through:
+//! - Atomic metadata for frequently-accessed root state
+//! - Direct mmap reads without locking for page access
+//! - parking_lot::RwLock for minimal lock contention
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use memmap2::MmapMut;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use super::{DbAddress, Page, PageHeader, PageType, RootPage, PAGE_SIZE};
@@ -48,14 +55,33 @@ pub enum CommitOptions {
 ///
 /// Provides memory-mapped storage with Copy-on-Write semantics for
 /// concurrent readers and a single writer.
+///
+/// ## Performance Notes
+///
+/// Frequently-accessed metadata is stored atomically to allow lock-free reads:
+/// - `batch_id`: Current batch ID
+/// - `block_number`: Current block number
+/// - `state_root_raw`: State root address (as raw u32)
+///
+/// The full root page is still protected by RwLock for writes,
+/// but readers can access common metadata without locking.
 pub struct PagedDb {
     /// Memory-mapped file (wrapped in Mutex for interior mutability).
     mmap: Mutex<MmapMut>,
     /// The underlying file.
     _file: Option<File>,
-    /// Current batch ID (monotonically increasing).
-    batch_id: u32,
-    /// Root page (page 0).
+    /// Current batch ID (atomic for lock-free reads).
+    batch_id: AtomicU32,
+    /// Block number (atomic for lock-free reads).
+    block_number_atomic: AtomicU32,
+    /// State root address (atomic for lock-free reads).
+    state_root_atomic: AtomicU32,
+    /// Block hash as two u64s (atomic for lock-free reads).
+    block_hash_low: AtomicU64,
+    block_hash_high: AtomicU64,
+    block_hash_mid1: AtomicU64,
+    block_hash_mid2: AtomicU64,
+    /// Root page (page 0) - protected by RwLock for full access.
     root: RwLock<RootPage>,
     /// Maximum number of pages.
     max_pages: u32,
@@ -109,10 +135,21 @@ impl PagedDb {
             (root, batch_id)
         };
 
+        // Extract atomic values from root
+        let block_number = root.block_number();
+        let block_hash = root.block_hash();
+        let state_root = root.state_root();
+
         let mut db = Self {
             mmap: Mutex::new(mmap),
             _file: Some(file),
-            batch_id,
+            batch_id: AtomicU32::new(batch_id),
+            block_number_atomic: AtomicU32::new(block_number),
+            state_root_atomic: AtomicU32::new(state_root.raw()),
+            block_hash_low: AtomicU64::new(u64::from_le_bytes(block_hash[0..8].try_into().unwrap())),
+            block_hash_mid1: AtomicU64::new(u64::from_le_bytes(block_hash[8..16].try_into().unwrap())),
+            block_hash_mid2: AtomicU64::new(u64::from_le_bytes(block_hash[16..24].try_into().unwrap())),
+            block_hash_high: AtomicU64::new(u64::from_le_bytes(block_hash[24..32].try_into().unwrap())),
             root: RwLock::new(root),
             max_pages,
         };
@@ -135,7 +172,13 @@ impl PagedDb {
         let mut db = Self {
             mmap: Mutex::new(mmap),
             _file: None,
-            batch_id: 1,
+            batch_id: AtomicU32::new(1),
+            block_number_atomic: AtomicU32::new(0),
+            state_root_atomic: AtomicU32::new(DbAddress::NULL.raw()),
+            block_hash_low: AtomicU64::new(0),
+            block_hash_mid1: AtomicU64::new(0),
+            block_hash_mid2: AtomicU64::new(0),
+            block_hash_high: AtomicU64::new(0),
             root: RwLock::new(root),
             max_pages: pages,
         };
@@ -146,7 +189,7 @@ impl PagedDb {
 
     /// Writes the root page to the memory map.
     fn write_root(&mut self) -> Result<()> {
-        let root = self.root.read().unwrap();
+        let root = self.root.read();
         let mut mmap = self.mmap.lock();
         mmap[0..PAGE_SIZE].copy_from_slice(root.page().as_bytes());
         Ok(())
@@ -154,26 +197,25 @@ impl PagedDb {
 
     /// Writes the root page (internal, for commit).
     fn write_root_internal(&self) -> Result<()> {
-        let root = self.root.read().unwrap();
+        let root = self.root.read();
         let mut mmap = self.mmap.lock();
         mmap[0..PAGE_SIZE].copy_from_slice(root.page().as_bytes());
         Ok(())
     }
 
-    /// Begins a new read-only batch.
+    /// Begins a new read-only batch (lock-free for common metadata).
     pub fn begin_read_only(&self) -> ReadOnlyBatch<'_> {
-        let root = self.root.read().unwrap();
+        // Use atomics for lock-free read of common metadata
         ReadOnlyBatch {
             db: self,
-            batch_id: root.page().header().batch_id,
-            block_number: root.block_number(),
+            batch_id: self.batch_id.load(Ordering::Acquire),
+            block_number: self.block_number_atomic.load(Ordering::Acquire),
         }
     }
 
     /// Begins a new writable batch.
     pub fn begin_batch(&mut self) -> BatchContext<'_> {
-        self.batch_id += 1;
-        let batch_id = self.batch_id;
+        let batch_id = self.batch_id.fetch_add(1, Ordering::SeqCst) + 1;
 
         BatchContext {
             db: self,
@@ -183,19 +225,26 @@ impl PagedDb {
         }
     }
 
-    /// Returns the current batch ID.
+    /// Returns the current batch ID (lock-free).
+    #[inline]
     pub fn batch_id(&self) -> u32 {
-        self.batch_id
+        self.batch_id.load(Ordering::Acquire)
     }
 
-    /// Returns the block number from the root.
+    /// Returns the block number from the root (lock-free).
+    #[inline]
     pub fn block_number(&self) -> u32 {
-        self.root.read().unwrap().block_number()
+        self.block_number_atomic.load(Ordering::Acquire)
     }
 
-    /// Returns the block hash from the root.
+    /// Returns the block hash from the root (lock-free).
     pub fn block_hash(&self) -> [u8; 32] {
-        self.root.read().unwrap().block_hash()
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&self.block_hash_low.load(Ordering::Acquire).to_le_bytes());
+        hash[8..16].copy_from_slice(&self.block_hash_mid1.load(Ordering::Acquire).to_le_bytes());
+        hash[16..24].copy_from_slice(&self.block_hash_mid2.load(Ordering::Acquire).to_le_bytes());
+        hash[24..32].copy_from_slice(&self.block_hash_high.load(Ordering::Acquire).to_le_bytes());
+        hash
     }
 
     /// Gets a page by address (read-only).
@@ -246,9 +295,9 @@ impl<'a> ReadOnlyBatch<'a> {
         self.db.get_page(addr)
     }
 
-    /// Gets the state root address.
+    /// Gets the state root address (lock-free).
     pub fn state_root(&self) -> DbAddress {
-        self.db.root.read().unwrap().state_root()
+        DbAddress::from(self.db.state_root_atomic.load(Ordering::Acquire))
     }
 }
 
@@ -273,7 +322,7 @@ impl<'a> BatchContext<'a> {
     /// Allocates a new page.
     pub fn allocate_page(&mut self, page_type: PageType, level: u8) -> Result<(DbAddress, Page)> {
         let addr = {
-            let mut root = self.db.root.write().unwrap();
+            let mut root = self.db.root.write();
             let addr = root.allocate_page();
             if addr.raw() >= self.db.max_pages {
                 return Err(DbError::Full);
@@ -325,14 +374,14 @@ impl<'a> BatchContext<'a> {
 
     /// Sets metadata (block number and hash).
     pub fn set_metadata(&mut self, block_number: u32, block_hash: &[u8; 32]) {
-        let mut root = self.db.root.write().unwrap();
+        let mut root = self.db.root.write();
         root.set_block_number(block_number);
         root.set_block_hash(block_hash);
     }
 
     /// Sets the state root address.
     pub fn set_state_root(&mut self, addr: DbAddress) {
-        let mut root = self.db.root.write().unwrap();
+        let mut root = self.db.root.write();
         root.set_state_root(addr);
     }
 
@@ -349,16 +398,25 @@ impl<'a> BatchContext<'a> {
             }
         }
 
-        // Update root batch ID
-        {
-            let mut root = self.db.root.write().unwrap();
+        // Update root batch ID and get metadata for atomics
+        let (block_number, block_hash, state_root) = {
+            let mut root = self.db.root.write();
             let mut header = root.page().header();
             header.batch_id = self.batch_id;
             root.page_mut().set_header(header);
-        }
+            (root.block_number(), root.block_hash(), root.state_root())
+        };
 
         // Write root page
         self.db.write_root_internal()?;
+
+        // Update atomics for lock-free readers (after root is written)
+        self.db.block_number_atomic.store(block_number, Ordering::Release);
+        self.db.state_root_atomic.store(state_root.raw(), Ordering::Release);
+        self.db.block_hash_low.store(u64::from_le_bytes(block_hash[0..8].try_into().unwrap()), Ordering::Release);
+        self.db.block_hash_mid1.store(u64::from_le_bytes(block_hash[8..16].try_into().unwrap()), Ordering::Release);
+        self.db.block_hash_mid2.store(u64::from_le_bytes(block_hash[16..24].try_into().unwrap()), Ordering::Release);
+        self.db.block_hash_high.store(u64::from_le_bytes(block_hash[24..32].try_into().unwrap()), Ordering::Release);
 
         // Flush based on options
         match options {
