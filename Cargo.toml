@@ -6,32 +6,24 @@ description = "A Paprika-inspired Ethereum state storage engine for ethrex"
 license = "MIT"
 
 [dependencies]
-memmap2 = "0.9"
-tiny-keccak = { version = "2.0", features = ["keccak"] }
-rlp = "0.5"
-primitive-types = "0.12"
-parking_lot = "0.12"
-thiserror = "1.0"
+memmap2.workspace = true
+tiny-keccak.workspace = true
+rlp.workspace = true
+primitive-types.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 wide = "0.7"  # Used in benchmarks for SIMD comparison
-rayon = "1.10"  # Parallel Merkle computation
+rayon.workspace = true
 
 [dev-dependencies]
 proptest = "1.4"
-tempfile = "3.10"
-hex = "0.4"
+tempfile.workspace = true
+hex.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
-ethrex-trie = { git = "https://github.com/lambdaclass/ethrex", package = "ethrex-trie" }
-ethrex-rlp = { git = "https://github.com/lambdaclass/ethrex", package = "ethrex-rlp" }
-cita_trie = "4.0"
-hasher = "0.1"
 
 [[bench]]
 name = "benchmarks"
-harness = false
-
-[[bench]]
-name = "trie_comparison"
 harness = false
 
 [[example]]

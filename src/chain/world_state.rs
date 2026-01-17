@@ -45,11 +45,7 @@ impl Account {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(104);
         buf.extend_from_slice(&self.nonce.to_le_bytes());
-
-        let mut balance_bytes = [0u8; 32];
-        self.balance.to_little_endian(&mut balance_bytes);
-        buf.extend_from_slice(&balance_bytes);
-
+        buf.extend_from_slice(&self.balance.to_little_endian());
         buf.extend_from_slice(self.code_hash.as_bytes());
         buf.extend_from_slice(self.storage_root.as_bytes());
         buf

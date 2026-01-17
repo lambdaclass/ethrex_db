@@ -59,12 +59,9 @@ pub struct Blockchain {
 
 /// Converts chain Account to trie AccountData.
 fn account_to_data(account: &Account) -> AccountData {
-    let mut balance = [0u8; 32];
-    account.balance.to_big_endian(&mut balance);
-
     AccountData {
         nonce: account.nonce,
-        balance,
+        balance: account.balance.to_big_endian(),
         storage_root: *account.storage_root.as_fixed_bytes(),
         code_hash: *account.code_hash.as_fixed_bytes(),
     }
@@ -184,11 +181,25 @@ impl Blockchain {
         None
     }
 
+    /// Gets a storage value from the specified block.
+    pub fn get_storage(&self, block_hash: &H256, address: &H256, key: &H256) -> Option<U256> {
+        let blocks = self.blocks_by_hash.read().unwrap();
+        if let Some(committed) = blocks.get(block_hash) {
+            return committed.block.get_storage(address, key);
+        }
+        None
+    }
+
     /// Finalizes blocks up to the given hash.
     ///
     /// This flushes the state to the underlying PagedDb and removes
     /// the finalized blocks from memory.
     pub fn finalize(&self, block_hash: H256) -> Result<()> {
+        // If already finalized to this hash, nothing to do
+        if block_hash == *self.last_finalized_hash.read().unwrap() {
+            return Ok(());
+        }
+
         // Find the block
         let block_number = {
             let blocks = self.blocks_by_hash.read().unwrap();
@@ -253,8 +264,7 @@ impl Blockchain {
                         let slot: [u8; 32] = *key.as_fixed_bytes();
 
                         // U256 values need to be converted
-                        let mut val = [0u8; 32];
-                        value.to_big_endian(&mut val);
+                        let val = value.to_big_endian();
 
                         storage.set(&slot, val);
                     }
@@ -323,6 +333,16 @@ impl Blockchain {
     /// Returns the number of committed (non-finalized) blocks.
     pub fn committed_count(&self) -> usize {
         self.blocks_by_hash.read().unwrap().len()
+    }
+
+    /// Sets the genesis block as the initial finalized state.
+    ///
+    /// This should be called once when initializing a new blockchain with genesis.
+    /// It sets the last finalized block hash and number without requiring
+    /// the block to be in hot storage first.
+    pub fn set_genesis(&self, genesis_hash: H256, genesis_number: u64) {
+        *self.last_finalized.write().unwrap() = genesis_number;
+        *self.last_finalized_hash.write().unwrap() = genesis_hash;
     }
 
     /// Handles a Fork Choice Update.
