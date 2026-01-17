@@ -69,6 +69,16 @@ impl PersistentTrie {
         self.pending.insert(key.to_vec(), Some(value));
     }
 
+    /// Batch insert multiple key-value pairs.
+    /// More efficient than individual inserts for bulk operations.
+    pub fn insert_batch(&mut self, entries: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>) {
+        let entries: Vec<_> = entries.into_iter().collect();
+        for (key, value) in &entries {
+            self.pending.insert(key.clone(), Some(value.clone()));
+        }
+        self.trie.insert_batch(entries);
+    }
+
     /// Gets a value by key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.trie.get(key).map(|v| v.to_vec())
@@ -202,6 +212,12 @@ impl StateTrie {
         self.trie.get(address_hash).map(|data| AccountData::decode(&data))
     }
 
+    /// Gets a storage value for an account using pre-hashed keys.
+    /// Returns None if the account or storage slot doesn't exist.
+    pub fn get_storage_by_hash(&self, address_hash: &[u8; 32], slot_hash: &[u8; 32]) -> Option<[u8; 32]> {
+        self.storage_tries.get(address_hash)?.get_by_hash(slot_hash)
+    }
+
     /// Sets an account.
     pub fn set_account(&mut self, address: &[u8; 20], account: AccountData) {
         let key = keccak256(address);
@@ -218,6 +234,15 @@ impl StateTrie {
     /// Used by snap sync to avoid re-encoding account data.
     pub fn set_account_raw(&mut self, address_hash: &[u8; 32], rlp_encoded: Vec<u8>) {
         self.trie.insert(address_hash, rlp_encoded);
+    }
+
+    /// Batch insert accounts using pre-hashed addresses.
+    /// More efficient than individual inserts for bulk operations like snap sync.
+    pub fn set_accounts_batch(&mut self, accounts: impl IntoIterator<Item = ([u8; 32], AccountData)>) {
+        let entries = accounts.into_iter().map(|(hash, account)| {
+            (hash.to_vec(), account.encode())
+        });
+        self.trie.insert_batch(entries);
     }
 
     /// Computes the state root hash.
@@ -297,6 +322,20 @@ impl StorageTrie {
         } else {
             self.trie.insert(slot_hash, trimmed);
         }
+    }
+
+    /// Batch set storage values using pre-hashed slot keys.
+    /// More efficient than individual sets for bulk operations like snap sync.
+    pub fn set_batch_by_hash(&mut self, entries: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) {
+        let trie_entries = entries.into_iter().filter_map(|(slot_hash, value)| {
+            let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
+            if trimmed.is_empty() {
+                None // Skip zero values (they're deletions)
+            } else {
+                Some((slot_hash.to_vec(), trimmed))
+            }
+        });
+        self.trie.insert_batch(trie_entries);
     }
 
     /// Sets a storage value using raw RLP-encoded data (as received from snap sync).
@@ -825,6 +864,12 @@ impl PagedStateTrie {
         self.state.set_account_raw(address_hash, rlp_encoded);
     }
 
+    /// Batch insert accounts using pre-hashed addresses.
+    /// More efficient than individual inserts for bulk operations like snap sync.
+    pub fn set_accounts_batch(&mut self, accounts: impl IntoIterator<Item = ([u8; 32], AccountData)>) {
+        self.state.set_accounts_batch(accounts);
+    }
+
     /// Gets the storage trie for an account.
     pub fn storage_trie(&mut self, address: &[u8; 20]) -> &mut StorageTrie {
         self.state.storage_trie(address)
@@ -834,6 +879,12 @@ impl PagedStateTrie {
     /// Used by snap sync which already has hashed addresses.
     pub fn storage_trie_by_hash(&mut self, address_hash: &[u8; 32]) -> &mut StorageTrie {
         self.state.storage_trie_by_hash(address_hash)
+    }
+
+    /// Gets a storage value for an account using pre-hashed keys.
+    /// Returns None if the account or storage slot doesn't exist.
+    pub fn get_storage_by_hash(&self, address_hash: &[u8; 32], slot_hash: &[u8; 32]) -> Option<[u8; 32]> {
+        self.state.get_storage_by_hash(address_hash, slot_hash)
     }
 
     /// Computes the state root hash.

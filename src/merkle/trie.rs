@@ -89,6 +89,20 @@ impl MerkleTrie {
         self.root_cache = None;
     }
 
+    /// Inserts multiple key-value pairs in a batch.
+    /// More efficient than individual inserts as it only invalidates the cache once.
+    pub fn insert_batch(&mut self, entries: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>) {
+        for (key, value) in entries {
+            if value.is_empty() {
+                self.data.remove(&key);
+            } else {
+                self.bloom.insert(&key);
+                self.data.insert(key, value);
+            }
+        }
+        self.root_cache = None;
+    }
+
     /// Gets a value by key.
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.data.get(key).map(|v| v.as_slice())
@@ -151,21 +165,205 @@ impl MerkleTrie {
             return EMPTY_ROOT;
         }
 
-        // Convert keys to nibble paths
-        let mut entries: Vec<(Vec<u8>, &[u8])> = self.data
-            .iter()
+        // Convert keys to nibble paths in parallel using rayon
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = self.data
+            .par_iter()
             .map(|(k, v)| {
                 let nibbles = key_to_nibbles(k);
-                (nibbles, v.as_slice())
+                (nibbles, v.clone())
             })
             .collect();
 
-        // Sort by nibble path for deterministic ordering
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        // Use parallel sort for large datasets - critical for 260M+ entries
+        entries.par_sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Build trie recursively
-        let node = self.build_node(&entries, 0);
-        node.keccak()
+        // Build trie iteratively to avoid stack overflow
+        self.build_node_iterative(&entries, 0)
+    }
+
+    /// Iteratively builds a trie and returns the root hash.
+    /// Uses an explicit stack to avoid stack overflow with deep tries.
+    fn build_node_iterative(&self, entries: &[(Vec<u8>, Vec<u8>)], start_depth: usize) -> [u8; HASH_SIZE] {
+        if entries.is_empty() {
+            return EMPTY_ROOT;
+        }
+
+        if entries.len() == 1 {
+            // Single entry - create a leaf
+            let (nibbles, value) = &entries[0];
+            let remaining: Vec<u8> = nibbles[start_depth..].to_vec();
+            let node = Node::leaf(remaining, value.clone());
+            return node.keccak();
+        }
+
+        // Work item representing a node to build
+        #[derive(Debug)]
+        enum WorkItem {
+            // Process this group of entries at given depth, store result at result_idx
+            Process {
+                entries_start: usize,
+                entries_end: usize,
+                depth: usize,
+                result_idx: usize,
+            },
+            // Finalize an extension node: combine prefix with child hash
+            FinalizeExtension {
+                prefix: Vec<u8>,
+                child_result_idx: usize,
+                result_idx: usize,
+            },
+            // Finalize a branch node: collect child hashes into branch
+            FinalizeBranch {
+                child_result_indices: [Option<usize>; 16],
+                value: Option<Vec<u8>>,
+                result_idx: usize,
+            },
+        }
+
+        // Estimate max results needed (very conservative)
+        let max_results = entries.len() * 2 + 1;
+        let mut results: Vec<Option<[u8; HASH_SIZE]>> = vec![None; max_results];
+        let mut next_result_idx = 1; // 0 is reserved for root
+        let mut work_stack: Vec<WorkItem> = Vec::with_capacity(128);
+
+        // Start with root
+        work_stack.push(WorkItem::Process {
+            entries_start: 0,
+            entries_end: entries.len(),
+            depth: start_depth,
+            result_idx: 0,
+        });
+
+        while let Some(work) = work_stack.pop() {
+            match work {
+                WorkItem::Process { entries_start, entries_end, depth, result_idx } => {
+                    let work_entries = &entries[entries_start..entries_end];
+
+                    if work_entries.is_empty() {
+                        results[result_idx] = Some(EMPTY_ROOT);
+                        continue;
+                    }
+
+                    if work_entries.len() == 1 {
+                        // Single entry - create a leaf
+                        let (nibbles, value) = &work_entries[0];
+                        let remaining: Vec<u8> = nibbles[depth..].to_vec();
+                        let node = Node::leaf(remaining, value.clone());
+                        results[result_idx] = Some(node.keccak());
+                        continue;
+                    }
+
+                    // Check for common prefix
+                    let common_prefix = find_common_prefix_owned(work_entries, depth);
+
+                    if common_prefix > 0 {
+                        // Extension node - need to compute child first, then finalize
+                        let prefix: Vec<u8> = work_entries[0].0[depth..depth + common_prefix].to_vec();
+                        let child_result_idx = next_result_idx;
+                        next_result_idx += 1;
+
+                        // Push finalize first (will be processed after child)
+                        work_stack.push(WorkItem::FinalizeExtension {
+                            prefix,
+                            child_result_idx,
+                            result_idx,
+                        });
+
+                        // Then push child processing
+                        work_stack.push(WorkItem::Process {
+                            entries_start,
+                            entries_end,
+                            depth: depth + common_prefix,
+                            result_idx: child_result_idx,
+                        });
+                        continue;
+                    }
+
+                    // Branch node - group by first nibble
+                    let mut groups: [(usize, usize); 16] = [(0, 0); 16]; // (start, end) indices
+                    let mut branch_value: Option<Vec<u8>> = None;
+
+                    // First pass: identify groups (entries are sorted, so same nibbles are contiguous)
+                    let mut current_nibble: Option<u8> = None;
+                    let mut group_start = entries_start;
+
+                    for (i, (nibbles, value)) in work_entries.iter().enumerate() {
+                        let global_i = entries_start + i;
+
+                        if depth >= nibbles.len() {
+                            // Entry's key ends here - it's the branch value
+                            branch_value = Some(value.clone());
+                            continue;
+                        }
+
+                        let nibble = nibbles[depth];
+
+                        if current_nibble != Some(nibble) {
+                            // Close previous group if any
+                            if let Some(prev_nibble) = current_nibble {
+                                groups[prev_nibble as usize] = (group_start, global_i);
+                            }
+                            current_nibble = Some(nibble);
+                            group_start = global_i;
+                        }
+                    }
+
+                    // Close last group
+                    if let Some(nibble) = current_nibble {
+                        groups[nibble as usize] = (group_start, entries_end);
+                    }
+
+                    // Allocate result indices for children
+                    let mut child_result_indices: [Option<usize>; 16] = [None; 16];
+                    for nibble in 0..16 {
+                        let (start, end) = groups[nibble];
+                        if start < end {
+                            child_result_indices[nibble] = Some(next_result_idx);
+                            next_result_idx += 1;
+                        }
+                    }
+
+                    // Push finalize branch (will be processed after all children)
+                    work_stack.push(WorkItem::FinalizeBranch {
+                        child_result_indices,
+                        value: branch_value,
+                        result_idx,
+                    });
+
+                    // Push child processing in reverse order (so they're processed in order)
+                    for nibble in (0..16).rev() {
+                        let (start, end) = groups[nibble];
+                        if start < end {
+                            work_stack.push(WorkItem::Process {
+                                entries_start: start,
+                                entries_end: end,
+                                depth: depth + 1,
+                                result_idx: child_result_indices[nibble].unwrap(),
+                            });
+                        }
+                    }
+                }
+
+                WorkItem::FinalizeExtension { prefix, child_result_idx, result_idx } => {
+                    let child_hash = results[child_result_idx].unwrap_or(EMPTY_ROOT);
+                    let node = Node::extension(prefix, child_hash);
+                    results[result_idx] = Some(node.keccak());
+                }
+
+                WorkItem::FinalizeBranch { child_result_indices, value, result_idx } => {
+                    let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+                    for (i, idx_opt) in child_result_indices.iter().enumerate() {
+                        if let Some(idx) = idx_opt {
+                            children[i] = results[*idx];
+                        }
+                    }
+                    let node = Node::Branch { children, value };
+                    results[result_idx] = Some(node.keccak());
+                }
+            }
+        }
+
+        results[0].unwrap_or(EMPTY_ROOT)
     }
 
     /// Builds a trie node from sorted entries at the given nibble depth.
@@ -416,6 +614,44 @@ fn key_to_nibbles(key: &[u8]) -> Vec<u8> {
         nibbles.push(byte & 0x0F);
     }
     nibbles
+}
+
+/// Finds the length of the common prefix among entries starting at the given depth.
+/// This version works with owned values (Vec<u8>, Vec<u8>).
+fn find_common_prefix_owned(entries: &[(Vec<u8>, Vec<u8>)], depth: usize) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+
+    let first = &entries[0].0;
+    if depth >= first.len() {
+        return 0;
+    }
+
+    let mut common_len = first.len() - depth;
+
+    for (nibbles, _) in &entries[1..] {
+        if depth >= nibbles.len() {
+            return 0;
+        }
+        let max_check = (nibbles.len() - depth).min(common_len);
+        let mut prefix_len = 0;
+
+        for i in 0..max_check {
+            if nibbles[depth + i] == first[depth + i] {
+                prefix_len += 1;
+            } else {
+                break;
+            }
+        }
+
+        common_len = prefix_len;
+        if common_len == 0 {
+            break;
+        }
+    }
+
+    common_len
 }
 
 // ============================================================================

@@ -101,6 +101,100 @@ impl Blockchain {
         }
     }
 
+    /// Creates a new blockchain with the given database and pre-populated state trie.
+    ///
+    /// Used by snap sync to initialize the blockchain with a trie that was
+    /// built during the snap sync process.
+    pub fn new_with_state_trie(db: PagedDb, state_trie: PagedStateTrie) -> Self {
+        let block_number = db.block_number() as u64;
+        let block_hash = H256::from(db.block_hash());
+
+        Self {
+            db: Arc::new(RwLock::new(db)),
+            state_trie: RwLock::new(state_trie),
+            blocks_by_hash: RwLock::new(HashMap::new()),
+            blocks_by_number: RwLock::new(HashMap::new()),
+            last_finalized: RwLock::new(block_number),
+            last_finalized_hash: RwLock::new(block_hash),
+        }
+    }
+
+    /// Replaces the state trie with a new one.
+    ///
+    /// Used by snap sync to set the trie after it has been populated.
+    /// WARNING: This will discard any uncommitted blocks and their state.
+    pub fn set_state_trie(&self, state_trie: PagedStateTrie) {
+        // Clear any uncommitted blocks since their state is no longer valid
+        self.blocks_by_hash.write().unwrap().clear();
+        self.blocks_by_number.write().unwrap().clear();
+
+        // Replace the state trie
+        *self.state_trie.write().unwrap() = state_trie;
+    }
+
+    /// Persists the current state trie to the database.
+    ///
+    /// Used by snap sync after populating the state trie to persist it to disk.
+    /// This also updates the block metadata to the given block number and hash.
+    pub fn persist_state_trie(&self, block_number: u64, block_hash: H256) -> Result<()> {
+        use crate::store::CommitOptions;
+
+        let mut db = self.db.write().unwrap();
+        let mut state_trie = self.state_trie.write().unwrap();
+        let mut batch = db.begin_batch();
+
+        // Save state trie and get the root address
+        let state_root_addr = state_trie.save(&mut batch)?;
+        batch.set_state_root(state_root_addr);
+
+        // Update block metadata
+        batch.set_metadata(
+            block_number as u32,
+            block_hash.as_fixed_bytes(),
+        );
+
+        batch.commit(CommitOptions::FlushDataOnly)?;
+
+        // Update finalized state
+        *self.last_finalized.write().unwrap() = block_number;
+        *self.last_finalized_hash.write().unwrap() = block_hash;
+
+        Ok(())
+    }
+
+    /// Persists the current state trie as a checkpoint without updating finalized block metadata.
+    ///
+    /// Used during snap sync to save incremental progress. Unlike `persist_state_trie`,
+    /// this does not update the finalized block number/hash in memory, allowing the sync
+    /// to resume from the checkpoint even if interrupted. The block metadata is saved
+    /// to the database but the in-memory state is not updated until full finalization.
+    pub fn persist_state_trie_checkpoint(&self, block_number: u64, block_hash: H256) -> Result<()> {
+        use crate::store::CommitOptions;
+
+        let mut db = self.db.write().unwrap();
+        let mut state_trie = self.state_trie.write().unwrap();
+        let mut batch = db.begin_batch();
+
+        // Save state trie and get the root address
+        let state_root_addr = state_trie.save(&mut batch)?;
+        batch.set_state_root(state_root_addr);
+
+        // Update block metadata in DB only (not in memory)
+        // This allows recovery from the checkpoint on restart
+        batch.set_metadata(
+            block_number as u32,
+            block_hash.as_fixed_bytes(),
+        );
+
+        batch.commit(CommitOptions::FlushDataOnly)?;
+
+        // Note: We intentionally do NOT update last_finalized or last_finalized_hash here.
+        // This is a checkpoint, not a full finalization. The in-memory state will be
+        // updated only when persist_state_trie is called at the end of snap sync.
+
+        Ok(())
+    }
+
     /// Returns the last finalized block number.
     pub fn last_finalized_number(&self) -> u64 {
         *self.last_finalized.read().unwrap()
@@ -334,6 +428,20 @@ impl Blockchain {
     pub fn get_finalized_account(&self, address: &[u8; 20]) -> Option<Account> {
         let trie = self.state_trie.read().unwrap();
         trie.get_account(address).map(|data| data_to_account(&data))
+    }
+
+    /// Gets an account from finalized state using a pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn get_finalized_account_by_hash(&self, address_hash: &[u8; 32]) -> Option<Account> {
+        let trie = self.state_trie.read().unwrap();
+        trie.get_account_by_hash(address_hash).map(|data| data_to_account(&data))
+    }
+
+    /// Gets a storage value from finalized state using pre-hashed keys.
+    pub fn get_finalized_storage_by_hash(&self, address_hash: &[u8; 32], slot_hash: &[u8; 32]) -> Option<U256> {
+        let trie = self.state_trie.read().unwrap();
+        trie.get_storage_by_hash(address_hash, slot_hash)
+            .map(|bytes| U256::from_big_endian(&bytes))
     }
 
     /// Returns the number of committed (non-finalized) blocks.
