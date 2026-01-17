@@ -271,6 +271,195 @@ impl PagedDb {
         mmap.flush()?;
         Ok(())
     }
+
+    /// Creates a snapshot of the current database state.
+    ///
+    /// The snapshot captures:
+    /// - Current batch ID
+    /// - Block number and hash
+    /// - State root address
+    /// - Next free page address
+    ///
+    /// This can be used to restore the database to this point.
+    pub fn create_snapshot(&self) -> Snapshot {
+        let root = self.root.read();
+        Snapshot {
+            batch_id: self.batch_id.load(Ordering::Acquire),
+            block_number: root.block_number(),
+            block_hash: root.block_hash(),
+            state_root: root.state_root(),
+            next_free_page: root.next_free_page(),
+        }
+    }
+
+    /// Restores the database metadata to a snapshot.
+    ///
+    /// WARNING: This only restores metadata pointers. The actual page data
+    /// must still exist in the database. Use this for rolling back to a
+    /// previous state within the same database file.
+    pub fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<()> {
+        {
+            let mut root = self.root.write();
+            root.set_block_number(snapshot.block_number);
+            root.set_block_hash(&snapshot.block_hash);
+            root.set_state_root(snapshot.state_root);
+            root.set_next_free_page(snapshot.next_free_page);
+        }
+
+        // Update atomics
+        self.batch_id.store(snapshot.batch_id, Ordering::Release);
+        self.block_number_atomic.store(snapshot.block_number, Ordering::Release);
+        self.state_root_atomic.store(snapshot.state_root.raw(), Ordering::Release);
+        self.block_hash_low.store(
+            u64::from_le_bytes(snapshot.block_hash[0..8].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_mid1.store(
+            u64::from_le_bytes(snapshot.block_hash[8..16].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_mid2.store(
+            u64::from_le_bytes(snapshot.block_hash[16..24].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_high.store(
+            u64::from_le_bytes(snapshot.block_hash[24..32].try_into().unwrap()),
+            Ordering::Release,
+        );
+
+        // Write to disk
+        self.write_root()?;
+        Ok(())
+    }
+
+    /// Exports the database to a writer.
+    ///
+    /// Exports all pages up to the current allocation point.
+    /// Can be used for backups or transferring state.
+    pub fn export<W: std::io::Write>(&self, mut writer: W) -> Result<()> {
+        let root = self.root.read();
+        let next_free = root.next_free_page().raw() as usize;
+        let mmap = self.mmap.lock();
+
+        // Write header: magic number + version + page count
+        writer.write_all(b"ETHREX01")?;
+        writer.write_all(&(next_free as u32).to_le_bytes())?;
+
+        // Write pages
+        for i in 0..next_free {
+            let offset = i * PAGE_SIZE;
+            if offset + PAGE_SIZE <= mmap.len() {
+                writer.write_all(&mmap[offset..offset + PAGE_SIZE])?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Imports database from a reader.
+    ///
+    /// Replaces the current database contents with imported data.
+    pub fn import<R: std::io::Read>(&mut self, mut reader: R) -> Result<()> {
+        // Read and verify header
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != b"ETHREX01" {
+            return Err(DbError::Corrupted);
+        }
+
+        let mut page_count_bytes = [0u8; 4];
+        reader.read_exact(&mut page_count_bytes)?;
+        let page_count = u32::from_le_bytes(page_count_bytes) as usize;
+
+        if page_count > self.max_pages as usize {
+            return Err(DbError::Full);
+        }
+
+        // Read pages
+        let mut mmap = self.mmap.lock();
+        for i in 0..page_count {
+            let offset = i * PAGE_SIZE;
+            reader.read_exact(&mut mmap[offset..offset + PAGE_SIZE])?;
+        }
+
+        // Reload root page
+        drop(mmap);
+        let mmap = self.mmap.lock();
+        let mut page_data = [0u8; PAGE_SIZE];
+        page_data.copy_from_slice(&mmap[0..PAGE_SIZE]);
+        let page = Page::from_bytes(page_data);
+        let root = RootPage::wrap(page);
+
+        // Update state
+        self.batch_id.store(root.page().header().batch_id, Ordering::Release);
+        self.block_number_atomic.store(root.block_number(), Ordering::Release);
+        self.state_root_atomic.store(root.state_root().raw(), Ordering::Release);
+        let block_hash = root.block_hash();
+        self.block_hash_low.store(
+            u64::from_le_bytes(block_hash[0..8].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_mid1.store(
+            u64::from_le_bytes(block_hash[8..16].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_mid2.store(
+            u64::from_le_bytes(block_hash[16..24].try_into().unwrap()),
+            Ordering::Release,
+        );
+        self.block_hash_high.store(
+            u64::from_le_bytes(block_hash[24..32].try_into().unwrap()),
+            Ordering::Release,
+        );
+
+        *self.root.write() = root;
+
+        Ok(())
+    }
+}
+
+/// A snapshot of the database state.
+///
+/// Contains metadata needed to identify and restore a specific state.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// Batch ID at snapshot time.
+    pub batch_id: u32,
+    /// Block number at snapshot time.
+    pub block_number: u32,
+    /// Block hash at snapshot time.
+    pub block_hash: [u8; 32],
+    /// State root address at snapshot time.
+    pub state_root: DbAddress,
+    /// Next free page at snapshot time.
+    pub next_free_page: DbAddress,
+}
+
+impl Snapshot {
+    /// Serializes the snapshot to bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(48);
+        bytes.extend_from_slice(&self.batch_id.to_le_bytes());
+        bytes.extend_from_slice(&self.block_number.to_le_bytes());
+        bytes.extend_from_slice(&self.block_hash);
+        bytes.extend_from_slice(&self.state_root.raw().to_le_bytes());
+        bytes.extend_from_slice(&self.next_free_page.raw().to_le_bytes());
+        bytes
+    }
+
+    /// Deserializes a snapshot from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 48 {
+            return None;
+        }
+        Some(Self {
+            batch_id: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            block_number: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            block_hash: bytes[8..40].try_into().ok()?,
+            state_root: DbAddress::from(u32::from_le_bytes(bytes[40..44].try_into().ok()?)),
+            next_free_page: DbAddress::from(u32::from_le_bytes(bytes[44..48].try_into().ok()?)),
+        })
+    }
 }
 
 /// A read-only view of the database.
@@ -733,5 +922,83 @@ mod tests {
         };
 
         assert_ne!(addr1, addr2, "Abandoned page should not be reused before reorg depth");
+    }
+
+    #[test]
+    fn test_snapshot_create_restore() {
+        let mut db = PagedDb::in_memory(100).unwrap();
+
+        // Make some changes
+        {
+            let mut batch = db.begin_batch();
+            batch.allocate_page(PageType::Data, 0).unwrap();
+            batch.set_metadata(10, &[1u8; 32]);
+            batch.commit(CommitOptions::DangerNoFlush).unwrap();
+        }
+
+        // Create snapshot
+        let snapshot = db.create_snapshot();
+        assert_eq!(snapshot.block_number, 10);
+        assert_eq!(snapshot.block_hash, [1u8; 32]);
+
+        // Make more changes
+        {
+            let mut batch = db.begin_batch();
+            batch.allocate_page(PageType::Data, 0).unwrap();
+            batch.set_metadata(20, &[2u8; 32]);
+            batch.commit(CommitOptions::DangerNoFlush).unwrap();
+        }
+
+        assert_eq!(db.block_number(), 20);
+
+        // Restore snapshot
+        db.restore_snapshot(&snapshot).unwrap();
+        assert_eq!(db.block_number(), 10);
+        assert_eq!(db.block_hash(), [1u8; 32]);
+    }
+
+    #[test]
+    fn test_snapshot_serialization() {
+        let snapshot = Snapshot {
+            batch_id: 42,
+            block_number: 100,
+            block_hash: [0xAB; 32],
+            state_root: DbAddress::page(10),
+            next_free_page: DbAddress::page(20),
+        };
+
+        let bytes = snapshot.to_bytes();
+        let restored = Snapshot::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.batch_id, 42);
+        assert_eq!(restored.block_number, 100);
+        assert_eq!(restored.block_hash, [0xAB; 32]);
+        assert_eq!(restored.state_root, DbAddress::page(10));
+        assert_eq!(restored.next_free_page, DbAddress::page(20));
+    }
+
+    #[test]
+    fn test_export_import() {
+        let mut db1 = PagedDb::in_memory(100).unwrap();
+
+        // Make changes
+        {
+            let mut batch = db1.begin_batch();
+            batch.allocate_page(PageType::Data, 0).unwrap();
+            batch.set_metadata(42, &[0xAB; 32]);
+            batch.commit(CommitOptions::DangerNoFlush).unwrap();
+        }
+
+        // Export to buffer
+        let mut buffer = Vec::new();
+        db1.export(&mut buffer).unwrap();
+
+        // Import into new database
+        let mut db2 = PagedDb::in_memory(100).unwrap();
+        db2.import(&buffer[..]).unwrap();
+
+        // Verify state matches
+        assert_eq!(db2.block_number(), 42);
+        assert_eq!(db2.block_hash(), [0xAB; 32]);
     }
 }

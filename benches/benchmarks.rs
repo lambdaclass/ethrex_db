@@ -368,8 +368,8 @@ fn bench_paged_db(c: &mut Criterion) {
 
     // Commit batch
     group.bench_function("commit_batch_10_pages", |b| {
-        let mut db = PagedDb::in_memory(10000).unwrap();
         b.iter(|| {
+            let mut db = PagedDb::in_memory(100).unwrap();
             let mut batch = db.begin_batch();
             for _ in 0..10 {
                 batch.allocate_page(PageType::Data, 0).unwrap();
