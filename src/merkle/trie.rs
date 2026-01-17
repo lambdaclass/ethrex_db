@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use super::node::{Node, NodeHash, HASH_SIZE, EMPTY_ROOT, keccak256};
+use super::bloom::BloomFilter;
 
 /// Trie errors.
 #[derive(Error, Debug)]
@@ -24,11 +25,23 @@ pub enum TrieError {
 ///
 /// This implementation stores all nodes in memory and recomputes
 /// the root hash when requested.
+///
+/// ## Performance Optimization
+///
+/// The trie includes a Bloom filter for fast negative lookups.
+/// When checking if a key exists, the Bloom filter can quickly
+/// confirm if a key is definitely NOT present without checking
+/// the hash map (no false negatives). This significantly speeds
+/// up non-existence checks and proof generation for missing keys.
 pub struct MerkleTrie {
     /// Key-value store (key bytes -> value bytes).
     data: HashMap<Vec<u8>, Vec<u8>>,
     /// Cached root hash (invalidated on changes).
     root_cache: Option<[u8; HASH_SIZE]>,
+    /// Bloom filter for fast negative lookups.
+    bloom: BloomFilter,
+    /// Count of Bloom filter hits (key definitely not present).
+    bloom_negatives: u64,
 }
 
 impl MerkleTrie {
@@ -37,6 +50,19 @@ impl MerkleTrie {
         Self {
             data: HashMap::new(),
             root_cache: Some(EMPTY_ROOT),
+            bloom: BloomFilter::new(),
+            bloom_negatives: 0,
+        }
+    }
+
+    /// Creates a new trie with expected capacity.
+    /// The Bloom filter will be sized appropriately for the expected number of entries.
+    pub fn with_capacity(expected_entries: usize) -> Self {
+        Self {
+            data: HashMap::with_capacity(expected_entries),
+            root_cache: Some(EMPTY_ROOT),
+            bloom: BloomFilter::for_capacity(expected_entries),
+            bloom_negatives: 0,
         }
     }
 
@@ -54,15 +80,36 @@ impl MerkleTrie {
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) {
         if value.is_empty() {
             self.data.remove(key);
+            // Note: Bloom filter doesn't support removal, but that's OK
+            // It just means we might have false positives for removed keys
         } else {
             self.data.insert(key.to_vec(), value);
+            self.bloom.insert(key);
         }
         self.root_cache = None;
     }
 
     /// Gets a value by key.
+    ///
+    /// Uses Bloom filter for fast negative lookup: if the Bloom filter
+    /// says the key is definitely not present, we skip the HashMap lookup.
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        // Fast path: Bloom filter says definitely not present
+        if !self.bloom.may_contain(key) {
+            return None;
+        }
+        // Bloom filter says maybe present, check HashMap
         self.data.get(key).map(|v| v.as_slice())
+    }
+
+    /// Checks if a key might exist in the trie.
+    ///
+    /// This is a fast check using the Bloom filter:
+    /// - Returns `false` if the key is definitely not present (no false negatives)
+    /// - Returns `true` if the key might be present (could be false positive)
+    #[inline]
+    pub fn may_contain(&self, key: &[u8]) -> bool {
+        self.bloom.may_contain(key)
     }
 
     /// Removes a key.
@@ -70,8 +117,15 @@ impl MerkleTrie {
         let result = self.data.remove(key);
         if result.is_some() {
             self.root_cache = None;
+            // Note: We don't remove from Bloom filter (it doesn't support removal)
+            // This is fine - we just get potential false positives for removed keys
         }
         result
+    }
+
+    /// Returns Bloom filter statistics.
+    pub fn bloom_stats(&self) -> (usize, f64) {
+        (self.bloom.count(), self.bloom.estimated_false_positive_rate())
     }
 
     /// Computes and returns the root hash.

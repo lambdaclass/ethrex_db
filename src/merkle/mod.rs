@@ -6,6 +6,7 @@
 mod node;
 mod trie;
 mod rlp_encode;
+mod bloom;
 
 #[cfg(test)]
 mod tests;
@@ -13,3 +14,4 @@ mod tests;
 pub use node::{Node, NodeType, keccak256, EMPTY_ROOT, HASH_SIZE};
 pub use trie::{MerkleTrie, TrieError};
 pub use rlp_encode::RlpEncoder;
+pub use bloom::BloomFilter;

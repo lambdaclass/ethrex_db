@@ -381,6 +381,98 @@ fn bench_paged_db(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark Bloom filter performance for non-existence lookups
+fn bench_bloom_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("BloomFilter");
+
+    // Create a trie with 10000 entries
+    let mut trie = MerkleTrie::new();
+    for i in 0u64..10000 {
+        let key = keccak256(&i.to_be_bytes());
+        trie.insert(&key, vec![i as u8; 32]);
+    }
+
+    // Benchmark: Look up keys that exist (Bloom filter passes, HashMap hit)
+    let existing_key = keccak256(&5000u64.to_be_bytes());
+    group.bench_function("lookup_existing_key", |b| {
+        b.iter(|| trie.get(black_box(&existing_key)))
+    });
+
+    // Benchmark: Look up keys that don't exist (Bloom filter early rejection)
+    // These keys are in a different range, so Bloom filter should reject them
+    let nonexistent_key = keccak256(&99999u64.to_be_bytes());
+    group.bench_function("lookup_nonexistent_key", |b| {
+        b.iter(|| trie.get(black_box(&nonexistent_key)))
+    });
+
+    // Benchmark: may_contain check (raw Bloom filter)
+    group.bench_function("may_contain_existing", |b| {
+        b.iter(|| trie.may_contain(black_box(&existing_key)))
+    });
+
+    group.bench_function("may_contain_nonexistent", |b| {
+        b.iter(|| trie.may_contain(black_box(&nonexistent_key)))
+    });
+
+    // Batch lookup of non-existent keys
+    let nonexistent_keys: Vec<_> = (100000u64..100100)
+        .map(|i| keccak256(&i.to_be_bytes()))
+        .collect();
+    group.throughput(Throughput::Elements(100));
+    group.bench_function("batch_lookup_nonexistent_100", |b| {
+        b.iter(|| {
+            for key in &nonexistent_keys {
+                black_box(trie.get(key));
+            }
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark LRU page cache performance
+fn bench_page_cache(c: &mut Criterion) {
+    let mut group = c.benchmark_group("PageCache");
+
+    // Create database with some pages
+    let mut db = PagedDb::in_memory(1000).unwrap();
+    let mut addrs = Vec::new();
+
+    // Allocate 100 pages
+    {
+        let mut batch = db.begin_batch();
+        for i in 0..100 {
+            let (addr, _) = batch.allocate_page(PageType::Data, i as u8).unwrap();
+            addrs.push(addr);
+        }
+        batch.commit(CommitOptions::DangerNoFlush).unwrap();
+    }
+
+    // Benchmark: First read (cache miss)
+    // Clear cache first
+    db.clear_cache();
+    let addr = addrs[50];
+    group.bench_function("first_read_cache_miss", |b| {
+        b.iter(|| {
+            db.clear_cache();
+            db.get_page(black_box(addr))
+        })
+    });
+
+    // Benchmark: Repeated read (cache hit)
+    // Warm up cache
+    let _ = db.get_page(addr);
+    group.bench_function("repeated_read_cache_hit", |b| {
+        b.iter(|| db.get_page(black_box(addr)))
+    });
+
+    // Report cache stats
+    let (hits, misses) = db.cache_stats();
+    println!("Cache hits: {}, misses: {}, hit rate: {:.1}%", hits, misses, db.cache_hit_rate());
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_nibble_path,
@@ -392,5 +484,7 @@ criterion_group!(
     bench_keccak,
     bench_state_trie,
     bench_paged_db,
+    bench_bloom_filter,
+    bench_page_cache,
 );
 criterion_main!(benches);

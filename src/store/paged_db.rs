@@ -13,9 +13,11 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use lru::LruCache;
 use memmap2::MmapMut;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -65,6 +67,9 @@ pub enum CommitOptions {
 ///
 /// The full root page is still protected by RwLock for writes,
 /// but readers can access common metadata without locking.
+/// Default LRU cache size (256 pages = 1MB with 4KB pages).
+const DEFAULT_CACHE_SIZE: usize = 256;
+
 pub struct PagedDb {
     /// Memory-mapped file (wrapped in Mutex for interior mutability).
     mmap: Mutex<MmapMut>,
@@ -85,6 +90,12 @@ pub struct PagedDb {
     root: RwLock<RootPage>,
     /// Maximum number of pages.
     max_pages: u32,
+    /// LRU page cache for hot data.
+    page_cache: Mutex<LruCache<u32, Page>>,
+    /// Cache hit counter (for metrics).
+    cache_hits: AtomicU64,
+    /// Cache miss counter (for metrics).
+    cache_misses: AtomicU64,
 }
 
 impl PagedDb {
@@ -152,6 +163,9 @@ impl PagedDb {
             block_hash_high: AtomicU64::new(u64::from_le_bytes(block_hash[24..32].try_into().unwrap())),
             root: RwLock::new(root),
             max_pages,
+            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap())),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
         };
 
         // Write initial root if new
@@ -181,6 +195,9 @@ impl PagedDb {
             block_hash_high: AtomicU64::new(0),
             root: RwLock::new(root),
             max_pages: pages,
+            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap())),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
         };
 
         db.write_root()?;
@@ -249,10 +266,25 @@ impl PagedDb {
     }
 
     /// Gets a page by address (read-only).
+    /// Uses LRU cache to speed up repeated accesses.
     pub fn get_page(&self, addr: DbAddress) -> Result<Page> {
         if addr.is_null() {
             return Err(DbError::PageNotFound(addr));
         }
+
+        let page_num = addr.raw();
+
+        // Check cache first (fast path)
+        {
+            let mut cache = self.page_cache.lock();
+            if let Some(page) = cache.get(&page_num) {
+                self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(page.clone());
+            }
+        }
+
+        // Cache miss - read from mmap
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         let offset = addr.file_offset() as usize;
         let mmap = self.mmap.lock();
@@ -262,7 +294,48 @@ impl PagedDb {
 
         let mut page_data = [0u8; PAGE_SIZE];
         page_data.copy_from_slice(&mmap[offset..offset + PAGE_SIZE]);
-        Ok(Page::from_bytes(page_data))
+        let page = Page::from_bytes(page_data);
+
+        // Store in cache
+        drop(mmap);
+        {
+            let mut cache = self.page_cache.lock();
+            cache.put(page_num, page.clone());
+        }
+
+        Ok(page)
+    }
+
+    /// Returns cache statistics (hits, misses).
+    pub fn cache_stats(&self) -> (u64, u64) {
+        (
+            self.cache_hits.load(Ordering::Relaxed),
+            self.cache_misses.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Returns the cache hit rate as a percentage (0.0 to 100.0).
+    pub fn cache_hit_rate(&self) -> f64 {
+        let hits = self.cache_hits.load(Ordering::Relaxed);
+        let misses = self.cache_misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        if total == 0 {
+            0.0
+        } else {
+            (hits as f64 / total as f64) * 100.0
+        }
+    }
+
+    /// Clears the page cache.
+    pub fn clear_cache(&self) {
+        let mut cache = self.page_cache.lock();
+        cache.clear();
+    }
+
+    /// Invalidates a specific page in the cache.
+    pub fn invalidate_cache(&self, addr: DbAddress) {
+        let mut cache = self.page_cache.lock();
+        cache.pop(&addr.raw());
     }
 
     /// Flushes all changes to disk.
@@ -663,7 +736,7 @@ impl<'a> BatchContext<'a> {
 
     /// Commits the batch to the database.
     pub fn commit(self, options: CommitOptions) -> Result<()> {
-        // Write dirty pages to mmap
+        // Write dirty pages to mmap and invalidate cache
         {
             let mut mmap = self.db.mmap.lock();
             for (addr, page) in &self.dirty_pages {
@@ -671,6 +744,14 @@ impl<'a> BatchContext<'a> {
                 if offset + PAGE_SIZE <= mmap.len() {
                     mmap[offset..offset + PAGE_SIZE].copy_from_slice(page.as_bytes());
                 }
+            }
+        }
+
+        // Invalidate cache entries for dirty pages
+        {
+            let mut cache = self.db.page_cache.lock();
+            for addr in self.dirty_pages.keys() {
+                cache.pop(&addr.raw());
             }
         }
 
