@@ -90,10 +90,16 @@ impl MerkleTrie {
     }
 
     /// Gets a value by key.
-    ///
-    /// Uses Bloom filter for fast negative lookup: if the Bloom filter
-    /// says the key is definitely not present, we skip the HashMap lookup.
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        self.data.get(key).map(|v| v.as_slice())
+    }
+
+    /// Gets a value by key, using Bloom filter for fast negative lookup.
+    ///
+    /// Use this when you expect many lookups for non-existent keys.
+    /// The Bloom filter can quickly confirm if a key is definitely NOT present.
+    /// For workloads with mostly existing keys, use `get()` instead.
+    pub fn get_with_bloom(&self, key: &[u8]) -> Option<&[u8]> {
         // Fast path: Bloom filter says definitely not present
         if !self.bloom.may_contain(key) {
             return None;
