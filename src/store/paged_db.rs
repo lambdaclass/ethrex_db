@@ -425,19 +425,32 @@ impl<'a> BatchContext<'a> {
     }
 
     /// Gets a writable copy of a page (Copy-on-Write).
+    ///
+    /// When a page from a previous batch is copied, the original is marked
+    /// as abandoned for future reuse (after reorg depth passes).
     pub fn get_writable_copy(&mut self, addr: DbAddress) -> Result<Page> {
-        // Already dirty?
+        // Already dirty in this batch?
         if let Some(page) = self.dirty_pages.get(&addr) {
             return Ok(page.clone());
         }
 
-        // Read and copy
+        // Read the original page
         let mut page = self.db.get_page(addr)?;
+        let original_batch = page.header().batch_id;
+
+        // Update header for this batch
         let mut header = page.header();
         header.batch_id = self.batch_id;
         page.set_header(header);
 
         self.dirty_pages.insert(addr, page.clone());
+
+        // Mark original page as abandoned if it's from a previous batch
+        // (pages from the current batch are new allocations, not COW)
+        if original_batch < self.batch_id {
+            self.abandoned_pages.push(addr);
+        }
+
         Ok(page)
     }
 
@@ -473,16 +486,71 @@ impl<'a> BatchContext<'a> {
         }
 
         // Track abandoned pages from this batch
-        {
+        if !self.abandoned_pages.is_empty() {
+            use super::AbandonedPage;
+
             let mut root = self.db.root.write();
+            let mut overflow_pages: Vec<DbAddress> = Vec::new();
+
             for &addr in &self.abandoned_pages {
                 // Try inline storage first (fast path)
                 if !root.try_add_abandoned_inline(addr, self.batch_id) {
-                    // Inline storage full or batch mismatch - would need to create AbandonedPage
-                    // For simplicity, we skip this for now and just lose the page
-                    // A full implementation would create an AbandonedPage and link it
-                    // This is acceptable for initial implementation as we're optimizing
-                    // for correctness first
+                    // Inline storage full or batch mismatch - collect for overflow
+                    overflow_pages.push(addr);
+                }
+            }
+
+            // Handle overflow: create AbandonedPage nodes
+            if !overflow_pages.is_empty() {
+                let mut current_abandoned: Option<AbandonedPage> = None;
+                let mut current_abandoned_addr: Option<DbAddress> = None;
+
+                for addr in overflow_pages {
+                    // Try to add to current abandoned page
+                    let added = if let Some(ref mut ap) = current_abandoned {
+                        ap.try_add(addr)
+                    } else {
+                        false
+                    };
+
+                    if !added {
+                        // Save current abandoned page if exists
+                        if let (Some(ap), Some(ap_addr)) = (current_abandoned.take(), current_abandoned_addr.take()) {
+                            // Write the abandoned page to mmap
+                            let mut mmap = self.db.mmap.lock();
+                            let offset = ap_addr.file_offset() as usize;
+                            if offset + PAGE_SIZE <= mmap.len() {
+                                mmap[offset..offset + PAGE_SIZE].copy_from_slice(ap.into_page().as_bytes());
+                            }
+                        }
+
+                        // Allocate new abandoned page
+                        let new_addr = root.allocate_page();
+                        if new_addr.raw() >= self.db.max_pages {
+                            // Database full - can't track more abandoned pages
+                            break;
+                        }
+
+                        // Create new abandoned page and link it
+                        let mut new_ap = AbandonedPage::new(self.batch_id, self.batch_id);
+                        new_ap.set_next(root.abandoned_head());
+                        root.set_abandoned_head(new_addr);
+
+                        // Add the address
+                        new_ap.try_add(addr);
+
+                        current_abandoned = Some(new_ap);
+                        current_abandoned_addr = Some(new_addr);
+                    }
+                }
+
+                // Write final abandoned page
+                if let (Some(ap), Some(ap_addr)) = (current_abandoned, current_abandoned_addr) {
+                    let mut mmap = self.db.mmap.lock();
+                    let offset = ap_addr.file_offset() as usize;
+                    if offset + PAGE_SIZE <= mmap.len() {
+                        mmap[offset..offset + PAGE_SIZE].copy_from_slice(ap.into_page().as_bytes());
+                    }
                 }
             }
         }

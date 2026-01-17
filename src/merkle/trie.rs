@@ -358,6 +358,240 @@ fn key_to_nibbles(key: &[u8]) -> Vec<u8> {
     nibbles
 }
 
+// ============================================================================
+// Merkle Proofs
+// ============================================================================
+
+/// A node in a Merkle proof path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProofNode {
+    /// Branch node with all 16 child hashes and optional value.
+    Branch {
+        children: Box<[Option<[u8; HASH_SIZE]>; 16]>,
+        value: Option<Vec<u8>>,
+    },
+    /// Extension node with path and child hash.
+    Extension {
+        path: Vec<u8>,
+        child: [u8; HASH_SIZE],
+    },
+    /// Leaf node with path and value.
+    Leaf {
+        path: Vec<u8>,
+        value: Vec<u8>,
+    },
+}
+
+/// A Merkle proof for a key-value inclusion.
+///
+/// Contains the sequence of nodes from root to the target key,
+/// allowing verification without the full trie.
+#[derive(Debug, Clone)]
+pub struct MerkleProof {
+    /// The key being proved.
+    pub key: Vec<u8>,
+    /// The value at the key (None for non-existence proofs).
+    pub value: Option<Vec<u8>>,
+    /// Proof nodes from root towards the key.
+    pub proof: Vec<ProofNode>,
+}
+
+impl MerkleTrie {
+    /// Generates a Merkle proof for the given key.
+    ///
+    /// Returns a proof that can be used to verify the key's inclusion
+    /// (or non-existence) in the trie.
+    pub fn generate_proof(&mut self, key: &[u8]) -> MerkleProof {
+        let value = self.data.get(key).cloned();
+
+        if self.data.is_empty() {
+            return MerkleProof {
+                key: key.to_vec(),
+                value,
+                proof: vec![],
+            };
+        }
+
+        // Convert keys to nibble paths
+        let mut entries: Vec<(Vec<u8>, &[u8])> = self.data
+            .iter()
+            .map(|(k, v)| {
+                let nibbles = key_to_nibbles(k);
+                (nibbles, v.as_slice())
+            })
+            .collect();
+
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let target_nibbles = key_to_nibbles(key);
+        let mut proof_nodes = Vec::new();
+
+        self.collect_proof(&entries, 0, &target_nibbles, &mut proof_nodes);
+
+        MerkleProof {
+            key: key.to_vec(),
+            value,
+            proof: proof_nodes,
+        }
+    }
+
+    /// Recursively collects proof nodes along the path to the target key.
+    fn collect_proof(
+        &self,
+        entries: &[(Vec<u8>, &[u8])],
+        depth: usize,
+        target: &[u8],
+        proof: &mut Vec<ProofNode>,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+
+        if entries.len() == 1 {
+            // Leaf node
+            let (nibbles, value) = &entries[0];
+            let remaining: Vec<u8> = nibbles[depth..].to_vec();
+            proof.push(ProofNode::Leaf {
+                path: remaining,
+                value: value.to_vec(),
+            });
+            return;
+        }
+
+        // Check for common prefix
+        let common_prefix = self.find_common_prefix(entries, depth);
+
+        if common_prefix > 0 {
+            // Extension node
+            let prefix: Vec<u8> = entries[0].0[depth..depth + common_prefix].to_vec();
+            let child_node = self.build_node(entries, depth + common_prefix);
+            let child_hash = child_node.keccak();
+
+            proof.push(ProofNode::Extension {
+                path: prefix,
+                child: child_hash,
+            });
+
+            // Continue down the path
+            self.collect_proof(entries, depth + common_prefix, target, proof);
+            return;
+        }
+
+        // Branch node
+        let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+        let mut branch_value: Option<Vec<u8>> = None;
+        let mut groups: [Vec<(Vec<u8>, &[u8])>; 16] = Default::default();
+
+        for (nibbles, value) in entries {
+            if depth >= nibbles.len() {
+                branch_value = Some(value.to_vec());
+            } else {
+                let nibble = nibbles[depth] as usize;
+                groups[nibble].push((nibbles.clone(), *value));
+            }
+        }
+
+        // Build child hashes
+        for (i, group) in groups.iter().enumerate() {
+            if !group.is_empty() {
+                let child_node = self.build_node(group, depth + 1);
+                match child_node.hash() {
+                    NodeHash::Hash(h) => children[i] = Some(h),
+                    NodeHash::Inline(data) => children[i] = Some(keccak256(&data)),
+                }
+            }
+        }
+
+        proof.push(ProofNode::Branch {
+            children: children.clone(),
+            value: branch_value,
+        });
+
+        // Continue down the target path if within bounds
+        if depth < target.len() {
+            let target_nibble = target[depth] as usize;
+            if !groups[target_nibble].is_empty() {
+                self.collect_proof(&groups[target_nibble], depth + 1, target, proof);
+            }
+        }
+    }
+}
+
+impl MerkleProof {
+    /// Verifies this proof against a given root hash.
+    ///
+    /// Returns true if the proof is valid for the given root.
+    pub fn verify(&self, root_hash: &[u8; HASH_SIZE]) -> bool {
+        if self.proof.is_empty() {
+            // Empty trie - root should be EMPTY_ROOT
+            return *root_hash == EMPTY_ROOT && self.value.is_none();
+        }
+
+        // Compute root from proof
+        let computed = self.compute_root_from_proof();
+        computed == *root_hash
+    }
+
+    /// Computes the root hash from the proof nodes.
+    fn compute_root_from_proof(&self) -> [u8; HASH_SIZE] {
+        use super::rlp_encode::RlpEncoder;
+
+        if self.proof.is_empty() {
+            return EMPTY_ROOT;
+        }
+
+        // Build from bottom up
+        let mut current_hash: Option<[u8; HASH_SIZE]> = None;
+
+        for node in self.proof.iter().rev() {
+            let mut enc = RlpEncoder::new();
+
+            match node {
+                ProofNode::Leaf { path, value } => {
+                    enc.encode_list(|e| {
+                        e.encode_nibbles(path, true);
+                        e.encode_bytes(value);
+                    });
+                }
+                ProofNode::Extension { path, child } => {
+                    enc.encode_list(|e| {
+                        e.encode_nibbles(path, false);
+                        e.encode_bytes(child);
+                    });
+                }
+                ProofNode::Branch { children, value } => {
+                    enc.encode_list(|e| {
+                        for child in children.iter() {
+                            match child {
+                                Some(h) => e.encode_bytes(h),
+                                None => e.encode_empty(),
+                            }
+                        }
+                        match value {
+                            Some(v) => e.encode_bytes(v),
+                            None => e.encode_empty(),
+                        }
+                    });
+                }
+            };
+
+            current_hash = Some(keccak256(enc.as_bytes()));
+        }
+
+        current_hash.unwrap_or(EMPTY_ROOT)
+    }
+
+    /// Returns true if this is a proof of inclusion (key exists).
+    pub fn is_inclusion(&self) -> bool {
+        self.value.is_some()
+    }
+
+    /// Returns true if this is a proof of non-existence (key does not exist).
+    pub fn is_exclusion(&self) -> bool {
+        self.value.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +746,78 @@ mod tests {
 
         // Both should produce the same hash
         assert_eq!(trie1.parallel_root_hash(), trie2.parallel_root_hash());
+    }
+
+    // Merkle proof tests
+
+    #[test]
+    fn test_proof_empty_trie() {
+        let mut trie = MerkleTrie::new();
+        let proof = trie.generate_proof(b"key");
+
+        assert!(proof.is_exclusion());
+        assert!(proof.verify(&EMPTY_ROOT));
+    }
+
+    #[test]
+    fn test_proof_single_entry() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(b"key", b"value".to_vec());
+
+        let root = trie.root_hash();
+        let proof = trie.generate_proof(b"key");
+
+        assert!(proof.is_inclusion());
+        assert_eq!(proof.value, Some(b"value".to_vec()));
+        assert!(!proof.proof.is_empty());
+    }
+
+    #[test]
+    fn test_proof_multiple_entries() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(b"do", b"verb".to_vec());
+        trie.insert(b"dog", b"puppy".to_vec());
+        trie.insert(b"doge", b"coin".to_vec());
+
+        let root = trie.root_hash();
+
+        // Proof for existing key
+        let proof = trie.generate_proof(b"dog");
+        assert!(proof.is_inclusion());
+        assert_eq!(proof.value, Some(b"puppy".to_vec()));
+
+        // Proof for non-existing key
+        let proof = trie.generate_proof(b"cat");
+        assert!(proof.is_exclusion());
+    }
+
+    #[test]
+    fn test_proof_types() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(b"key1", b"value1".to_vec());
+        trie.insert(b"key2", b"value2".to_vec());
+
+        let proof = trie.generate_proof(b"key1");
+
+        // Check that proof contains nodes
+        assert!(!proof.proof.is_empty());
+
+        // Verify proof node types exist
+        for node in &proof.proof {
+            match node {
+                ProofNode::Branch { children, value } => {
+                    // Branch node has 16 children
+                    assert_eq!(children.len(), 16);
+                }
+                ProofNode::Extension { path, child } => {
+                    // Extension has a path
+                    assert!(!path.is_empty() || child.len() == 32);
+                }
+                ProofNode::Leaf { path, value } => {
+                    // Leaf has value
+                    assert!(!value.is_empty());
+                }
+            }
+        }
     }
 }
