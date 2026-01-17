@@ -120,6 +120,12 @@ impl Blockchain {
         let finalized_hash = *self.last_finalized_hash.read().unwrap();
         let finalized_number = *self.last_finalized.read().unwrap();
 
+        // Special case: genesis block (block 0) with parent H256::zero()
+        // on an empty blockchain (finalized at block 0, hash zero)
+        if block_number == 0 && parent_hash == H256::zero() && finalized_hash == H256::zero() && finalized_number == 0 {
+            return Ok(Block::new(block_number, block_hash, parent_hash));
+        }
+
         if parent_hash == finalized_hash {
             // Building on top of finalized state
             if block_number != finalized_number + 1 {
