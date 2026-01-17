@@ -396,6 +396,32 @@ Core data structures:
   - `fuzz_slotted_array` - SlottedArray with consistency verification
   - `fuzz_merkle_trie` - Trie operations with expected state tracking
 
+### Phase 9: Planned
+
+**Option A: Ethereum Compatibility Verification**
+- [ ] Test state roots against real mainnet blocks
+- [ ] Verify RLP encoding matches Ethereum spec exactly
+- [ ] Add test vectors from ethereum/tests repository
+- [ ] Ensure Merkle proofs are compatible with other clients
+
+**Option B: Durability & Crash Recovery**
+- [ ] Write-ahead logging (WAL)
+- [ ] Proper fsync strategies for commit durability
+- [ ] Recovery from incomplete/corrupted writes
+- [ ] Atomic metadata updates
+
+**Option C: Production Hardening**
+- [ ] Better error handling and recovery paths
+- [ ] Memory pressure handling (graceful degradation)
+- [ ] OpenTelemetry/tracing integration
+- [ ] Connection pooling for concurrent access
+
+**Option D: Performance Optimizations**
+- [ ] LRU page cache for hot data
+- [ ] Contract ID system (like Paprika) for storage efficiency
+- [ ] Background compaction of abandoned pages
+- [ ] Bloom filters for non-existence proofs
+
 ## Dependencies
 
 | Crate | Purpose |
