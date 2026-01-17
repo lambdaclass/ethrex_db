@@ -19,30 +19,49 @@ Benchmark comparison against ethrex-trie and cita_trie (the baseline used by eth
 
 ### Insert Performance
 
-| Items | ethrex_db | ethrex-trie | cita_trie | Speedup vs ethrex-trie |
-|-------|-----------|-------------|-----------|------------------------|
-| 100   | **68 µs** | 110 µs      | 131 µs    | **1.6x faster**        |
-| 1,000 | **762 µs** | 1.35 ms    | 1.39 ms   | **1.8x faster**        |
-| 10,000| **7.8 ms** | 14.7 ms    | 14.8 ms   | **1.9x faster**        |
+| Items | ethrex_db | ethrex-trie | cita_trie | Speedup |
+|-------|-----------|-------------|-----------|---------|
+| 100   | **68 µs** (1.47 Melem/s) | 109 µs | 129 µs | **1.6-1.9x faster** |
+| 1,000 | **761 µs** (1.31 Melem/s) | 1.35 ms | 1.49 ms | **1.8-2.0x faster** |
+| 10,000| **7.9 ms** (1.27 Melem/s) | 17.0 ms | 15.1 ms | **1.9-2.2x faster** |
 
 ### Get Performance (single lookup in 1000-entry trie)
 
 | Implementation | Time | Speedup |
 |----------------|------|---------|
-| ethrex_db      | **13 ns** | - |
-| ethrex-trie    | 144 ns | **11x faster** |
-| cita_trie      | 208 ns | **16x faster** |
+| ethrex_db      | **14 ns** | baseline |
+| ethrex-trie    | 143 ns | **10x faster** |
+| cita_trie      | 206 ns | **15x faster** |
 
-### Root Hash Computation
+### Root Hash Computation (cached)
 
 | Items | ethrex_db | ethrex-trie | Speedup |
 |-------|-----------|-------------|---------|
-| 100   | **3.6 ns** | 39 ns      | **11x faster** |
-| 1,000 | **3.6 ns** | 40 ns      | **11x faster** |
+| 100   | **3.6 ns** | 42 ns | **12x faster** |
+| 1,000 | **3.6 ns** | 48 ns | **13x faster** |
+
+### Parallel Merkle Computation
+
+| Entries | Sequential | Parallel | Speedup |
+|---------|------------|----------|---------|
+| 100     | 64 µs | 47 µs | 1.4x |
+| 1,000   | 678 µs | 298 µs | **2.3x** |
+| 10,000  | 7.3 ms | 2.3 ms | **3.2x** |
+
+### Core Operations
+
+| Operation | Performance |
+|-----------|-------------|
+| NibblePath get_nibble | **1 ns** |
+| SlottedArray insert (500 entries) | **30.6 Melem/s** |
+| SlottedArray lookup | **156 ns** |
+| PagedDb allocate_page | **9.5 ns** |
+| Keccak256 (32 bytes) | **170 ns** (179 MiB/s) |
 
 Run benchmarks yourself:
 ```bash
-cargo bench --bench trie_comparison
+cargo bench --bench trie_comparison  # Compare against other tries
+cargo bench --bench benchmarks       # Full benchmark suite
 ```
 
 ## Design: Why Not MPT on RocksDB?
@@ -260,9 +279,23 @@ cargo test
 ```
 
 The project includes:
-- **117 tests** (97 unit + 20 integration)
+- **119 tests** (unit + integration)
 - **Property-based tests** using `proptest` for NibblePath, SlottedArray, and MerkleTrie
 - **End-to-end tests** covering multi-block chains, forks, storage operations, state persistence
+
+### Fuzzing
+
+The project includes fuzz targets for critical data structures:
+
+```bash
+# Install cargo-fuzz if needed
+cargo install cargo-fuzz
+
+# Run fuzzers
+cargo fuzz run fuzz_nibble_path
+cargo fuzz run fuzz_slotted_array
+cargo fuzz run fuzz_merkle_trie
+```
 
 ## Implementation Status
 
@@ -343,6 +376,25 @@ Core data structures:
 - [x] Configurable reorg depth (default: 64 batches)
 - [x] Automatic page reuse after reorg depth passes
 - [x] AbandonedPage linked list for overflow (structure in place)
+
+### Phase 7: Production Features ✅
+
+- [x] COW integration with `abandon_page()` - automatic tracking during Copy-on-Write
+- [x] AbandonedPage overflow handling - linked list for large abandoned sets
+- [x] SlottedArray defragmentation - `defragment()`, `wasted_space()`, `needs_defragmentation()`
+- [x] Merkle proof generation - `ProofNode`, `MerkleProof`, `generate_proof()`, `verify()`
+- [x] Snapshot/checkpoint support - `create_snapshot()`, `restore_snapshot()`, `export()`, `import()`
+
+### Phase 8: Observability & Testing ✅
+
+- [x] Metrics module (`DbMetrics`, `MetricsSnapshot`)
+  - Page allocations, reuse, abandonment tracking
+  - COW operations, batch commits/aborts
+  - Bytes read/written, snapshot operations
+- [x] Fuzz testing with `cargo-fuzz`
+  - `fuzz_nibble_path` - NibblePath operations
+  - `fuzz_slotted_array` - SlottedArray with consistency verification
+  - `fuzz_merkle_trie` - Trie operations with expected state tracking
 
 ## Dependencies
 
