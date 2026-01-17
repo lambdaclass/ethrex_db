@@ -184,16 +184,40 @@ impl StateTrie {
         self.storage_tries.entry(key).or_insert_with(StorageTrie::new)
     }
 
+    /// Gets or creates a storage trie for an account using a pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn storage_trie_by_hash(&mut self, address_hash: &[u8; 32]) -> &mut StorageTrie {
+        self.storage_tries.entry(*address_hash).or_insert_with(StorageTrie::new)
+    }
+
     /// Gets an account by address.
     pub fn get_account(&self, address: &[u8; 20]) -> Option<AccountData> {
         let key = keccak256(address);
-        self.trie.get(&key).map(|data| AccountData::decode(&data))
+        self.get_account_by_hash(&key)
+    }
+
+    /// Gets an account by pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn get_account_by_hash(&self, address_hash: &[u8; 32]) -> Option<AccountData> {
+        self.trie.get(address_hash).map(|data| AccountData::decode(&data))
     }
 
     /// Sets an account.
     pub fn set_account(&mut self, address: &[u8; 20], account: AccountData) {
         let key = keccak256(address);
-        self.trie.insert(&key, account.encode());
+        self.set_account_by_hash(&key, account);
+    }
+
+    /// Sets an account using a pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn set_account_by_hash(&mut self, address_hash: &[u8; 32], account: AccountData) {
+        self.trie.insert(address_hash, account.encode());
+    }
+
+    /// Sets an account using raw RLP-encoded data (as received from snap sync).
+    /// Used by snap sync to avoid re-encoding account data.
+    pub fn set_account_raw(&mut self, address_hash: &[u8; 32], rlp_encoded: Vec<u8>) {
+        self.trie.insert(address_hash, rlp_encoded);
     }
 
     /// Computes the state root hash.
@@ -243,7 +267,13 @@ impl StorageTrie {
     /// Gets a storage value.
     pub fn get(&self, slot: &[u8; 32]) -> Option<[u8; 32]> {
         let key = keccak256(slot);
-        self.trie.get(&key).map(|v| {
+        self.get_by_hash(&key)
+    }
+
+    /// Gets a storage value using a pre-hashed slot key.
+    /// Used by snap sync which already has hashed keys.
+    pub fn get_by_hash(&self, slot_hash: &[u8; 32]) -> Option<[u8; 32]> {
+        self.trie.get(slot_hash).map(|v| {
             let mut arr = [0u8; 32];
             let len = v.len().min(32);
             arr[32 - len..].copy_from_slice(&v[v.len() - len..]);
@@ -254,12 +284,28 @@ impl StorageTrie {
     /// Sets a storage value.
     pub fn set(&mut self, slot: &[u8; 32], value: [u8; 32]) {
         let key = keccak256(slot);
+        self.set_by_hash(&key, value);
+    }
+
+    /// Sets a storage value using a pre-hashed slot key.
+    /// Used by snap sync which already has hashed keys.
+    pub fn set_by_hash(&mut self, slot_hash: &[u8; 32], value: [u8; 32]) {
         // RLP encode the value (strip leading zeros)
         let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
         if trimmed.is_empty() {
-            self.trie.remove(&key);
+            self.trie.remove(slot_hash);
         } else {
-            self.trie.insert(&key, trimmed);
+            self.trie.insert(slot_hash, trimmed);
+        }
+    }
+
+    /// Sets a storage value using raw RLP-encoded data (as received from snap sync).
+    /// Used by snap sync to avoid re-encoding storage values.
+    pub fn set_raw(&mut self, slot_hash: &[u8; 32], rlp_encoded: Vec<u8>) {
+        if rlp_encoded.is_empty() {
+            self.trie.remove(slot_hash);
+        } else {
+            self.trie.insert(slot_hash, rlp_encoded);
         }
     }
 
@@ -756,14 +802,38 @@ impl PagedStateTrie {
         self.state.get_account(address)
     }
 
+    /// Gets an account by pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn get_account_by_hash(&self, address_hash: &[u8; 32]) -> Option<AccountData> {
+        self.state.get_account_by_hash(address_hash)
+    }
+
     /// Sets an account.
     pub fn set_account(&mut self, address: &[u8; 20], account: AccountData) {
         self.state.set_account(address, account);
     }
 
+    /// Sets an account using a pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn set_account_by_hash(&mut self, address_hash: &[u8; 32], account: AccountData) {
+        self.state.set_account_by_hash(address_hash, account);
+    }
+
+    /// Sets an account using raw RLP-encoded data (as received from snap sync).
+    /// Used by snap sync to avoid re-encoding account data.
+    pub fn set_account_raw(&mut self, address_hash: &[u8; 32], rlp_encoded: Vec<u8>) {
+        self.state.set_account_raw(address_hash, rlp_encoded);
+    }
+
     /// Gets the storage trie for an account.
     pub fn storage_trie(&mut self, address: &[u8; 20]) -> &mut StorageTrie {
         self.state.storage_trie(address)
+    }
+
+    /// Gets the storage trie for an account using a pre-hashed address.
+    /// Used by snap sync which already has hashed addresses.
+    pub fn storage_trie_by_hash(&mut self, address_hash: &[u8; 32]) -> &mut StorageTrie {
+        self.state.storage_trie_by_hash(address_hash)
     }
 
     /// Computes the state root hash.
