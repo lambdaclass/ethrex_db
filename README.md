@@ -52,11 +52,21 @@ Benchmark comparison against ethrex-trie and cita_trie (the baseline used by eth
 
 | Operation | Performance |
 |-----------|-------------|
-| NibblePath get_nibble | **1 ns** |
-| SlottedArray insert (500 entries) | **30.6 Melem/s** |
-| SlottedArray lookup | **156 ns** |
-| PagedDb allocate_page | **9.5 ns** |
+| NibblePath from_bytes | **14.2 ns** |
+| NibblePath get_nibble | **1.0 ns** |
+| NibblePath common_prefix_len | **1.3 ns** |
+| SlottedArray insert (100 entries) | **27.2 Melem/s** |
+| SlottedArray insert (500 entries) | **31.5 Melem/s** |
+| SlottedArray lookup (100 entries) | **156 ns** (3.2 Gelem/s) |
 | Keccak256 (32 bytes) | **170 ns** (179 MiB/s) |
+
+### Phase 10 Optimizations
+
+| Optimization | Before | After | Improvement |
+|--------------|--------|-------|-------------|
+| Page read (cached) | 168 ns | 56 ns | **3x faster** |
+| Bloom filter membership | - | 173 ns | Fast negative lookups |
+| Cache hit rate | - | 70%+ | Typical workload |
 
 Run benchmarks yourself:
 ```bash
