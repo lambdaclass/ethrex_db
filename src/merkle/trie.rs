@@ -425,10 +425,9 @@ impl MerkleTrie {
 
                 WorkItem::FinalizeExtension { prefix, child_result_idx, result_idx } => {
                     let child_result = results[child_result_idx].as_ref().unwrap_or(&NodeResult::Empty);
-                    // Extension node always stores the hash of the child (even if child is small)
-                    // because extension nodes themselves can be large
-                    let child_hash = child_result.to_hash();
-                    let node = Node::extension(prefix, child_hash);
+                    // Extension node with proper inline handling
+                    let child_ref = child_result.to_child_ref();
+                    let node = Node::extension_with_child_ref(prefix, child_ref);
                     results[result_idx] = Some(NodeResult::Encoded(node.encode()));
                 }
 
@@ -475,11 +474,12 @@ impl MerkleTrie {
         let common_prefix = self.find_common_prefix(entries, depth);
 
         if common_prefix > 0 {
-            // Create extension node
+            // Create extension node with proper inline handling
             let prefix: Vec<u8> = entries[0].0[depth..depth + common_prefix].to_vec();
             let child_node = self.build_node(entries, depth + common_prefix);
-            let child_hash = child_node.keccak();
-            return Node::extension(prefix, child_hash);
+            let encoded = child_node.encode();
+            let child_ref = ChildRef::from_encoded(encoded);
+            return Node::extension_with_child_ref(prefix, child_ref);
         }
 
         // Create branch node with proper inline handling
@@ -620,11 +620,12 @@ impl MerkleTrie {
         let common_prefix = self.find_common_prefix(entries, depth);
 
         if common_prefix > 0 {
-            // Create extension node
+            // Create extension node with proper inline handling
             let prefix: Vec<u8> = entries[0].0[depth..depth + common_prefix].to_vec();
             let child_node = self.build_node_parallel(entries, depth + common_prefix);
-            let child_hash = child_node.keccak();
-            return Node::extension(prefix, child_hash);
+            let encoded = child_node.encode();
+            let child_ref = ChildRef::from_encoded(encoded);
+            return Node::extension_with_child_ref(prefix, child_ref);
         }
 
         // Create branch node with proper inline handling

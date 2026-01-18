@@ -86,8 +86,8 @@ pub enum Node {
     Extension {
         /// Shared path prefix (nibbles).
         path: Vec<u8>,
-        /// Hash of the child node.
-        child: [u8; HASH_SIZE],
+        /// Reference to child node (hash or inline).
+        child: ChildRef,
     },
 
     /// Branch node: has up to 16 children (one for each nibble) and an optional value.
@@ -110,8 +110,13 @@ impl Node {
         Node::Leaf { path, value }
     }
 
-    /// Creates an extension node.
+    /// Creates an extension node with a hash child.
     pub fn extension(path: Vec<u8>, child: [u8; HASH_SIZE]) -> Self {
+        Node::Extension { path, child: ChildRef::Hash(child) }
+    }
+
+    /// Creates an extension node with a ChildRef.
+    pub fn extension_with_child_ref(path: Vec<u8>, child: ChildRef) -> Self {
         Node::Extension { path, child }
     }
 
@@ -165,7 +170,11 @@ impl Node {
             Node::Extension { path, child } => {
                 encoder.encode_list(|e| {
                     e.encode_nibbles(path, false);
-                    e.encode_bytes(child);
+                    match child {
+                        ChildRef::Hash(hash) => e.encode_bytes(hash),
+                        ChildRef::Inline(data) => e.encode_raw(data),
+                        ChildRef::Empty => e.encode_empty(),
+                    }
                 });
             }
             Node::Branch { children, value } => {
