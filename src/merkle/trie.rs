@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 use thiserror::Error;
 
-use super::node::{Node, NodeHash, HASH_SIZE, EMPTY_ROOT, keccak256};
+use super::node::{Node, NodeHash, HASH_SIZE, EMPTY_ROOT, keccak256, ChildRef};
 use super::bloom::BloomFilter;
 
 /// Trie errors.
@@ -183,6 +183,10 @@ impl MerkleTrie {
 
     /// Iteratively builds a trie and returns the root hash.
     /// Uses an explicit stack to avoid stack overflow with deep tries.
+    ///
+    /// This implementation properly handles inline nodes per Ethereum's MPT spec:
+    /// - If a child node's RLP encoding is < 32 bytes, it's embedded inline
+    /// - If >= 32 bytes, the keccak256 hash is stored instead
     fn build_node_iterative(&self, entries: &[(Vec<u8>, Vec<u8>)], start_depth: usize) -> [u8; HASH_SIZE] {
         if entries.is_empty() {
             return EMPTY_ROOT;
@@ -206,13 +210,13 @@ impl MerkleTrie {
                 depth: usize,
                 result_idx: usize,
             },
-            // Finalize an extension node: combine prefix with child hash
+            // Finalize an extension node: combine prefix with child
             FinalizeExtension {
                 prefix: Vec<u8>,
                 child_result_idx: usize,
                 result_idx: usize,
             },
-            // Finalize a branch node: collect child hashes into branch
+            // Finalize a branch node: collect children into branch
             FinalizeBranch {
                 child_result_indices: [Option<usize>; 16],
                 value: Option<Vec<u8>>,
@@ -220,9 +224,41 @@ impl MerkleTrie {
             },
         }
 
+        // NodeResult stores either the encoded node (for potential inlining) or just a hash
+        // We store the full encoded data so we can determine if children should be inlined
+        #[derive(Clone)]
+        enum NodeResult {
+            /// The RLP-encoded node data
+            Encoded(Vec<u8>),
+            /// Empty node
+            Empty,
+        }
+
+        impl NodeResult {
+            fn to_child_ref(&self) -> ChildRef {
+                match self {
+                    NodeResult::Encoded(data) => {
+                        if data.len() >= HASH_SIZE {
+                            ChildRef::Hash(keccak256(data))
+                        } else {
+                            ChildRef::Inline(data.clone())
+                        }
+                    }
+                    NodeResult::Empty => ChildRef::Empty,
+                }
+            }
+
+            fn to_hash(&self) -> [u8; HASH_SIZE] {
+                match self {
+                    NodeResult::Encoded(data) => keccak256(data),
+                    NodeResult::Empty => EMPTY_ROOT,
+                }
+            }
+        }
+
         // Estimate max results needed (very conservative)
         let max_results = entries.len() * 2 + 1;
-        let mut results: Vec<Option<[u8; HASH_SIZE]>> = vec![None; max_results];
+        let mut results: Vec<Option<NodeResult>> = vec![None; max_results];
         let mut next_result_idx = 1; // 0 is reserved for root
         let mut work_stack: Vec<WorkItem> = Vec::with_capacity(128);
 
@@ -240,7 +276,7 @@ impl MerkleTrie {
                     let work_entries = &entries[entries_start..entries_end];
 
                     if work_entries.is_empty() {
-                        results[result_idx] = Some(EMPTY_ROOT);
+                        results[result_idx] = Some(NodeResult::Empty);
                         continue;
                     }
 
@@ -249,7 +285,7 @@ impl MerkleTrie {
                         let (nibbles, value) = &work_entries[0];
                         let remaining: Vec<u8> = nibbles[depth..].to_vec();
                         let node = Node::leaf(remaining, value.clone());
-                        results[result_idx] = Some(node.keccak());
+                        results[result_idx] = Some(NodeResult::Encoded(node.encode()));
                         continue;
                     }
 
@@ -345,25 +381,38 @@ impl MerkleTrie {
                 }
 
                 WorkItem::FinalizeExtension { prefix, child_result_idx, result_idx } => {
-                    let child_hash = results[child_result_idx].unwrap_or(EMPTY_ROOT);
+                    let child_result = results[child_result_idx].as_ref().unwrap_or(&NodeResult::Empty);
+                    // Extension node always stores the hash of the child (even if child is small)
+                    // because extension nodes themselves can be large
+                    let child_hash = child_result.to_hash();
                     let node = Node::extension(prefix, child_hash);
-                    results[result_idx] = Some(node.keccak());
+                    results[result_idx] = Some(NodeResult::Encoded(node.encode()));
                 }
 
                 WorkItem::FinalizeBranch { child_result_indices, value, result_idx } => {
-                    let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+                    // Build children with proper inline handling
+                    let mut children: Box<[ChildRef; 16]> = Box::new([
+                        ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                        ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                        ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                        ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                    ]);
+
                     for (i, idx_opt) in child_result_indices.iter().enumerate() {
                         if let Some(idx) = idx_opt {
-                            children[i] = results[*idx];
+                            if let Some(child_result) = &results[*idx] {
+                                children[i] = child_result.to_child_ref();
+                            }
                         }
                     }
-                    let node = Node::Branch { children, value };
-                    results[result_idx] = Some(node.keccak());
+
+                    let node = Node::branch_with_children(children, value);
+                    results[result_idx] = Some(NodeResult::Encoded(node.encode()));
                 }
             }
         }
 
-        results[0].unwrap_or(EMPTY_ROOT)
+        results[0].as_ref().map(|r| r.to_hash()).unwrap_or(EMPTY_ROOT)
     }
 
     /// Builds a trie node from sorted entries at the given nibble depth.
@@ -390,8 +439,13 @@ impl MerkleTrie {
             return Node::extension(prefix, child_hash);
         }
 
-        // Create branch node
-        let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+        // Create branch node with proper inline handling
+        let mut children: Box<[ChildRef; 16]> = Box::new([
+            ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+        ]);
         let mut branch_value: Option<Vec<u8>> = None;
 
         // Group entries by first nibble at current depth
@@ -407,24 +461,16 @@ impl MerkleTrie {
             }
         }
 
-        // Build child nodes
+        // Build child nodes with proper inline handling
         for (i, group) in groups.iter().enumerate() {
             if !group.is_empty() {
                 let child_node = self.build_node(group, depth + 1);
-                match child_node.hash() {
-                    NodeHash::Hash(h) => children[i] = Some(h),
-                    NodeHash::Inline(data) => {
-                        // For inline nodes, hash the data
-                        children[i] = Some(keccak256(&data));
-                    }
-                }
+                let encoded = child_node.encode();
+                children[i] = ChildRef::from_encoded(encoded);
             }
         }
 
-        Node::Branch {
-            children,
-            value: branch_value,
-        }
+        Node::branch_with_children(children, branch_value)
     }
 
     /// Finds the length of the common prefix among entries starting at the given depth.
@@ -538,7 +584,7 @@ impl MerkleTrie {
             return Node::extension(prefix, child_hash);
         }
 
-        // Create branch node
+        // Create branch node with proper inline handling
         let mut branch_value: Option<Vec<u8>> = None;
 
         // Group entries by first nibble at current depth
@@ -556,47 +602,50 @@ impl MerkleTrie {
 
         // Build child nodes in parallel if we have enough entries
         let total_entries: usize = groups.iter().map(|g| g.len()).sum();
-        let children: Box<[Option<[u8; HASH_SIZE]>; 16]> = if total_entries > 64 {
+        let children: Box<[ChildRef; 16]> = if total_entries > 64 {
             // Parallel computation for large branches
-            let child_hashes: Vec<Option<[u8; HASH_SIZE]>> = groups
+            let child_refs: Vec<ChildRef> = groups
                 .par_iter()
                 .map(|group| {
                     if group.is_empty() {
-                        None
+                        ChildRef::Empty
                     } else {
                         let child_node = self.build_node_parallel(group, depth + 1);
-                        match child_node.hash() {
-                            NodeHash::Hash(h) => Some(h),
-                            NodeHash::Inline(data) => Some(keccak256(&data)),
-                        }
+                        let encoded = child_node.encode();
+                        ChildRef::from_encoded(encoded)
                     }
                 })
                 .collect();
 
-            let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
-            for (i, hash) in child_hashes.into_iter().enumerate() {
-                children[i] = hash;
+            let mut children: Box<[ChildRef; 16]> = Box::new([
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ]);
+            for (i, child_ref) in child_refs.into_iter().enumerate() {
+                children[i] = child_ref;
             }
             children
         } else {
             // Sequential computation for small branches
-            let mut children: Box<[Option<[u8; HASH_SIZE]>; 16]> = Box::new([None; 16]);
+            let mut children: Box<[ChildRef; 16]> = Box::new([
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ]);
             for (i, group) in groups.iter().enumerate() {
                 if !group.is_empty() {
                     let child_node = self.build_node_parallel(group, depth + 1);
-                    match child_node.hash() {
-                        NodeHash::Hash(h) => children[i] = Some(h),
-                        NodeHash::Inline(data) => children[i] = Some(keccak256(&data)),
-                    }
+                    let encoded = child_node.encode();
+                    children[i] = ChildRef::from_encoded(encoded);
                 }
             }
             children
         };
 
-        Node::Branch {
-            children,
-            value: branch_value,
-        }
+        Node::branch_with_children(children, branch_value)
     }
 }
 

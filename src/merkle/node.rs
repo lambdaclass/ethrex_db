@@ -19,6 +19,55 @@ pub enum NodeType {
     Branch,
 }
 
+/// Reference to a child node in the trie.
+///
+/// Per Ethereum's MPT spec:
+/// - If the RLP encoding of a child is >= 32 bytes, store the keccak256 hash
+/// - If the RLP encoding is < 32 bytes, embed the RLP directly (inline)
+#[derive(Clone, Debug)]
+pub enum ChildRef {
+    /// Empty child (null).
+    Empty,
+    /// Child whose RLP encoding is >= 32 bytes - stored as keccak256 hash.
+    Hash([u8; HASH_SIZE]),
+    /// Child whose RLP encoding is < 32 bytes - stored inline.
+    /// The Vec contains the actual RLP-encoded node.
+    Inline(Vec<u8>),
+}
+
+impl ChildRef {
+    /// Creates a ChildRef from an encoded node.
+    ///
+    /// If the encoded node is >= 32 bytes, it's hashed.
+    /// If < 32 bytes, it's stored inline.
+    pub fn from_encoded(encoded: Vec<u8>) -> Self {
+        if encoded.len() >= HASH_SIZE {
+            let hash = keccak256(&encoded);
+            ChildRef::Hash(hash)
+        } else {
+            ChildRef::Inline(encoded)
+        }
+    }
+
+    /// Returns the hash for this child reference.
+    ///
+    /// For Hash: returns the hash directly.
+    /// For Inline: computes keccak256 of the inline data.
+    /// For Empty: this shouldn't be called (will return zeros).
+    pub fn to_hash(&self) -> [u8; HASH_SIZE] {
+        match self {
+            ChildRef::Hash(h) => *h,
+            ChildRef::Inline(data) => keccak256(data),
+            ChildRef::Empty => [0u8; HASH_SIZE],
+        }
+    }
+
+    /// Returns true if this is empty.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, ChildRef::Empty)
+    }
+}
+
 /// A node in the Merkle Patricia Trie.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -43,8 +92,8 @@ pub enum Node {
 
     /// Branch node: has up to 16 children (one for each nibble) and an optional value.
     Branch {
-        /// Children (16 slots, one per nibble).
-        children: Box<[Option<[u8; HASH_SIZE]>; 16]>,
+        /// Children (16 slots, one per nibble). Uses ChildRef for proper inline handling.
+        children: Box<[ChildRef; 16]>,
         /// Optional value stored at this branch.
         value: Option<Vec<u8>>,
     },
@@ -69,9 +118,19 @@ impl Node {
     /// Creates an empty branch node.
     pub fn branch() -> Self {
         Node::Branch {
-            children: Box::new([None; 16]),
+            children: Box::new([
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+                ChildRef::Empty, ChildRef::Empty, ChildRef::Empty, ChildRef::Empty,
+            ]),
             value: None,
         }
+    }
+
+    /// Creates a branch node with the given children.
+    pub fn branch_with_children(children: Box<[ChildRef; 16]>, value: Option<Vec<u8>>) -> Self {
+        Node::Branch { children, value }
     }
 
     /// Returns the node type.
@@ -113,8 +172,9 @@ impl Node {
                 encoder.encode_list(|e| {
                     for child in children.iter() {
                         match child {
-                            Some(hash) => e.encode_bytes(hash),
-                            None => e.encode_empty(),
+                            ChildRef::Hash(hash) => e.encode_bytes(hash),
+                            ChildRef::Inline(data) => e.encode_raw(data),
+                            ChildRef::Empty => e.encode_empty(),
                         }
                     }
                     match value {
@@ -225,7 +285,7 @@ mod tests {
     fn test_branch_node() {
         let mut node = Node::branch();
         if let Node::Branch { children, value } = &mut node {
-            children[0] = Some([0u8; 32]);
+            children[0] = ChildRef::Hash([0u8; 32]);
             *value = Some(vec![0x42]);
         }
 

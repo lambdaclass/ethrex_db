@@ -63,6 +63,14 @@ impl RlpEncoder {
         }
     }
 
+    /// Encodes raw bytes without any RLP prefix.
+    ///
+    /// Used for inline nodes in branch children - the data is already RLP-encoded
+    /// and should be embedded directly without an additional string prefix.
+    pub fn encode_raw(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
     /// Encodes an empty string.
     pub fn encode_empty(&mut self) {
         self.buffer.push(0x80);
