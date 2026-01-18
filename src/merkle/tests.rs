@@ -15,6 +15,13 @@ mod proptest_tests {
                 1..20
             )
         ) {
+            use std::collections::HashMap;
+
+            // Deduplicate entries to ensure consistent final state regardless of order
+            // (last write wins, so with duplicates, order would matter)
+            let unique_entries: HashMap<Vec<u8>, Vec<u8>> = entries.into_iter().collect();
+            let entries: Vec<_> = unique_entries.into_iter().collect();
+
             let mut trie1 = MerkleTrie::new();
             let mut trie2 = MerkleTrie::new();
 

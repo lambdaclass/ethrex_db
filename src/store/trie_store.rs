@@ -81,6 +81,18 @@ impl PersistentTrie {
         self.trie.insert_batch(entries);
     }
 
+    /// Batch insert key-value pairs where keys are already 32-byte hashes.
+    ///
+    /// Optimized for snap sync - skips redundant hashing in bloom filter
+    /// since keys are already keccak256 hashes.
+    pub fn insert_batch_prehashed(&mut self, entries: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
+        let entries: Vec<_> = entries.into_iter().collect();
+        for (key, value) in &entries {
+            self.pending.insert(key.to_vec(), Some(value.clone()));
+        }
+        self.trie.insert_batch_prehashed(entries);
+    }
+
     /// Gets a value by key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.trie.get(key).map(|v| v.to_vec())
@@ -240,11 +252,16 @@ impl StateTrie {
 
     /// Batch insert accounts using pre-hashed addresses.
     /// More efficient than individual inserts for bulk operations like snap sync.
+    ///
+    /// Uses optimized insertion path that:
+    /// - Skips redundant keccak256 in bloom filter (keys are already hashes)
+    /// - Batches bloom filter updates for better cache locality
+    /// - Pre-reserves HashMap capacity
     pub fn set_accounts_batch(&mut self, accounts: impl IntoIterator<Item = ([u8; 32], AccountData)>) {
         let entries = accounts.into_iter().map(|(hash, account)| {
-            (hash.to_vec(), account.encode())
+            (hash, account.encode())
         });
-        self.trie.insert_batch(entries);
+        self.trie.insert_batch_prehashed(entries);
     }
 
     /// Computes the state root hash.
@@ -388,16 +405,21 @@ impl StorageTrie {
 
     /// Batch set storage values using pre-hashed slot keys.
     /// More efficient than individual sets for bulk operations like snap sync.
+    ///
+    /// Uses optimized insertion path that:
+    /// - Skips redundant keccak256 in bloom filter (keys are already hashes)
+    /// - Batches bloom filter updates for better cache locality
+    /// - Pre-reserves HashMap capacity
     pub fn set_batch_by_hash(&mut self, entries: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) {
-        let trie_entries = entries.into_iter().filter_map(|(slot_hash, value)| {
+        let trie_entries: Vec<_> = entries.into_iter().filter_map(|(slot_hash, value)| {
             let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
             if trimmed.is_empty() {
                 None // Skip zero values (they're deletions)
             } else {
-                Some((slot_hash.to_vec(), trimmed))
+                Some((slot_hash, trimmed))
             }
-        });
-        self.trie.insert_batch(trie_entries);
+        }).collect();
+        self.trie.insert_batch_prehashed(trie_entries);
     }
 
     /// Sets a storage value using raw RLP-encoded data (as received from snap sync).

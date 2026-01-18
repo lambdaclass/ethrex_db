@@ -107,6 +107,69 @@ impl BloomFilter {
         self.count = 0;
     }
 
+    /// Inserts a pre-hashed key (already keccak256).
+    ///
+    /// Use this when the key is already a 32-byte hash (like address_hash or slot_hash
+    /// in snap sync) to avoid redundant hashing.
+    #[inline]
+    pub fn insert_prehashed(&mut self, hash: &[u8; 32]) {
+        let hashes = self.hashes_from_prehashed(hash);
+        for h in hashes {
+            let idx = h % self.num_bits;
+            let word_idx = idx / 64;
+            let bit_idx = idx % 64;
+            self.bits[word_idx] |= 1u64 << bit_idx;
+        }
+        self.count += 1;
+    }
+
+    /// Batch insert multiple pre-hashed keys.
+    ///
+    /// More efficient than individual inserts - avoids repeated hash computations
+    /// and allows better CPU cache utilization.
+    pub fn insert_batch_prehashed<'a>(&mut self, keys: impl IntoIterator<Item = &'a [u8; 32]>) {
+        for hash in keys {
+            let hashes = self.hashes_from_prehashed(hash);
+            for h in hashes {
+                let idx = h % self.num_bits;
+                let word_idx = idx / 64;
+                let bit_idx = idx % 64;
+                self.bits[word_idx] |= 1u64 << bit_idx;
+            }
+            self.count += 1;
+        }
+    }
+
+    /// Checks if a pre-hashed key might be in the filter.
+    #[inline]
+    pub fn may_contain_prehashed(&self, hash: &[u8; 32]) -> bool {
+        let hashes = self.hashes_from_prehashed(hash);
+        for h in hashes {
+            let idx = h % self.num_bits;
+            let word_idx = idx / 64;
+            let bit_idx = idx % 64;
+            if self.bits[word_idx] & (1u64 << bit_idx) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Computes hash indices directly from a pre-hashed key.
+    /// Skips keccak256 since the input is already a hash.
+    #[inline]
+    fn hashes_from_prehashed(&self, hash: &[u8; 32]) -> [usize; NUM_HASHES] {
+        // Extract two 64-bit values from the 256-bit hash
+        let h1 = u64::from_le_bytes(hash[0..8].try_into().unwrap()) as usize;
+        let h2 = u64::from_le_bytes(hash[8..16].try_into().unwrap()) as usize;
+
+        let mut hashes = [0usize; NUM_HASHES];
+        for i in 0..NUM_HASHES {
+            hashes[i] = h1.wrapping_add(i.wrapping_mul(h2));
+        }
+        hashes
+    }
+
     /// Computes multiple hash values from a single key.
     /// Uses double hashing: h_i(x) = h1(x) + i * h2(x)
     fn compute_hashes(&self, key: &[u8]) -> [usize; NUM_HASHES] {

@@ -16,6 +16,8 @@ tracing.workspace = true
 wide = "0.7"  # Used in benchmarks for SIMD comparison
 rayon.workspace = true
 lru = "0.12"  # LRU page cache for performance
+hashbrown = { version = "0.15", features = ["rayon"] }  # Faster HashMap with parallel iteration
+rustc-hash = "2.1"  # FxHash - fast non-cryptographic hash for known-good keys
 
 [dev-dependencies]
 proptest = "1.4"
