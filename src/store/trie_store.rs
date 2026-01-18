@@ -309,6 +309,25 @@ impl StateTrie {
     pub fn storage_trie_count(&self) -> usize {
         self.storage_tries.len()
     }
+
+    /// Checks if a storage trie exists for an account.
+    pub fn has_storage_trie(&self, address_hash: &[u8; 32]) -> bool {
+        self.storage_tries.contains_key(address_hash)
+    }
+
+    /// Updates an account's storage_root field.
+    ///
+    /// Used after storage healing to set EMPTY_TRIE_HASH for accounts
+    /// that had no storage returned during healing.
+    pub fn update_account_storage_root(&mut self, address_hash: &[u8; 32], storage_root: [u8; 32]) {
+        if let Some(account_data) = self.trie.get(address_hash) {
+            let mut account = AccountData::decode(&account_data);
+            if account.storage_root != storage_root {
+                account.storage_root = storage_root;
+                self.trie.insert(address_hash, account.encode());
+            }
+        }
+    }
 }
 
 impl Default for StateTrie {
@@ -966,6 +985,19 @@ impl PagedStateTrie {
     /// Returns the number of storage tries currently in memory.
     pub fn storage_trie_count(&self) -> usize {
         self.state.storage_trie_count()
+    }
+
+    /// Checks if a storage trie exists for an account.
+    pub fn has_storage_trie(&self, address_hash: &[u8; 32]) -> bool {
+        self.state.has_storage_trie(address_hash)
+    }
+
+    /// Updates an account's storage_root field.
+    ///
+    /// Used after storage healing to set EMPTY_TRIE_HASH for accounts
+    /// that had no storage returned during healing.
+    pub fn update_account_storage_root(&mut self, address_hash: &[u8; 32], storage_root: [u8; 32]) {
+        self.state.update_account_storage_root(address_hash, storage_root);
     }
 }
 
