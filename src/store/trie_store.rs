@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use tracing::warn;
+
 use crate::data::{NibblePath, SlottedArray, PAGE_SIZE};
 use crate::merkle::{keccak256, MerkleTrie, EMPTY_ROOT};
 use crate::store::{DbAddress, PageType, LeafPage, DataPage, BatchContext, PagedDb, DbError};
@@ -289,6 +291,13 @@ impl StateTrie {
                     account.storage_root = storage_root;
                     self.trie.insert(&addr_hash, account.encode());
                 }
+            } else {
+                // This indicates a data inconsistency - we have storage for an account that
+                // doesn't exist in the state trie. The storage data will be lost.
+                warn!(
+                    "flush_storage_tries: orphaned storage trie for missing account {:?}, storage root: {:?}",
+                    addr_hash, storage_root
+                );
             }
             // storage_trie is dropped here, freeing its memory
         }
@@ -703,7 +712,14 @@ impl PagedStateTrie {
             }
         }
 
-        // TODO: Load storage tries from the page as well
+        // Note: Storage tries are not persisted to PagedDb pages. Instead:
+        // - During snap sync, storage tries are built in memory
+        // - flush_storage_tries() computes storage roots and updates account data
+        // - The storage slot data is dropped from memory after computing roots
+        // - During normal operation, storage is accessed via the flat key-value store
+        //
+        // If a StateRoot page is ever created with storage trie references,
+        // loading them would require implementing storage trie page persistence first.
 
         Ok(())
     }
