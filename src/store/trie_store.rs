@@ -266,6 +266,40 @@ impl StateTrie {
 
         self.trie.root_hash()
     }
+
+    /// Flushes all storage tries to free memory.
+    ///
+    /// This computes the storage root for each account's storage trie,
+    /// updates the account's storage_root field, and then clears the
+    /// storage tries from memory. This is essential for memory-efficient
+    /// snap sync with large state.
+    ///
+    /// Returns the number of storage tries that were flushed.
+    pub fn flush_storage_tries(&mut self) -> usize {
+        let count = self.storage_tries.len();
+
+        // Drain all storage tries, computing roots and updating accounts
+        for (addr_hash, mut storage_trie) in self.storage_tries.drain() {
+            let storage_root = storage_trie.root_hash();
+
+            // Update the account's storage_root if we have the account
+            if let Some(account_data) = self.trie.get(&addr_hash) {
+                let mut account = AccountData::decode(&account_data);
+                if account.storage_root != storage_root {
+                    account.storage_root = storage_root;
+                    self.trie.insert(&addr_hash, account.encode());
+                }
+            }
+            // storage_trie is dropped here, freeing its memory
+        }
+
+        count
+    }
+
+    /// Returns the number of storage tries currently in memory.
+    pub fn storage_trie_count(&self) -> usize {
+        self.storage_tries.len()
+    }
 }
 
 impl Default for StateTrie {
@@ -900,6 +934,22 @@ impl PagedStateTrie {
     /// Returns the number of accounts.
     pub fn account_count(&self) -> usize {
         self.state.trie.len()
+    }
+
+    /// Flushes all storage tries to free memory.
+    ///
+    /// This computes the storage root for each account's storage trie,
+    /// updates the account's storage_root field, and then clears the
+    /// storage tries from memory. Essential for memory-efficient snap sync.
+    ///
+    /// Returns the number of storage tries that were flushed.
+    pub fn flush_storage_tries(&mut self) -> usize {
+        self.state.flush_storage_tries()
+    }
+
+    /// Returns the number of storage tries currently in memory.
+    pub fn storage_trie_count(&self) -> usize {
+        self.state.storage_trie_count()
     }
 }
 
