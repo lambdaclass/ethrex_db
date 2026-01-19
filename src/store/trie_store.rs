@@ -391,15 +391,59 @@ impl StorageTrie {
         self.set_by_hash(&key, value);
     }
 
+    /// RLP-encodes a storage value (U256 as big-endian bytes).
+    ///
+    /// Ethereum storage trie stores RLP-encoded values, not raw bytes.
+    /// This function:
+    /// 1. Trims leading zeros
+    /// 2. Applies RLP byte string encoding
+    ///
+    /// Returns None for zero values (which should be deleted).
+    fn rlp_encode_storage_value(value: &[u8; 32]) -> Option<Vec<u8>> {
+        let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
+        if trimmed.is_empty() {
+            return None; // Zero value = deletion
+        }
+
+        // RLP encoding for byte strings:
+        // - Single byte < 0x80: encoded as itself
+        // - Single byte >= 0x80: [0x81, byte]
+        // - 2-55 bytes: [0x80 + len, bytes...]
+        if trimmed.len() == 1 && trimmed[0] < 0x80 {
+            Some(trimmed)
+        } else if trimmed.len() < 56 {
+            let mut encoded = Vec::with_capacity(1 + trimmed.len());
+            encoded.push(0x80 + trimmed.len() as u8);
+            encoded.extend_from_slice(&trimmed);
+            Some(encoded)
+        } else {
+            // Storage values are at most 32 bytes, so this case shouldn't happen
+            // But handle it correctly anyway
+            let len_bytes = {
+                let mut n = trimmed.len();
+                let mut bytes = Vec::new();
+                while n > 0 {
+                    bytes.push((n & 0xff) as u8);
+                    n >>= 8;
+                }
+                bytes.reverse();
+                bytes
+            };
+            let mut encoded = Vec::with_capacity(1 + len_bytes.len() + trimmed.len());
+            encoded.push(0xb7 + len_bytes.len() as u8);
+            encoded.extend_from_slice(&len_bytes);
+            encoded.extend_from_slice(&trimmed);
+            Some(encoded)
+        }
+    }
+
     /// Sets a storage value using a pre-hashed slot key.
     /// Used by snap sync which already has hashed keys.
     pub fn set_by_hash(&mut self, slot_hash: &[u8; 32], value: [u8; 32]) {
-        // RLP encode the value (strip leading zeros)
-        let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
-        if trimmed.is_empty() {
-            self.trie.remove(slot_hash);
+        if let Some(rlp_value) = Self::rlp_encode_storage_value(&value) {
+            self.trie.insert(slot_hash, rlp_value);
         } else {
-            self.trie.insert(slot_hash, trimmed);
+            self.trie.remove(slot_hash);
         }
     }
 
@@ -412,12 +456,7 @@ impl StorageTrie {
     /// - Pre-reserves HashMap capacity
     pub fn set_batch_by_hash(&mut self, entries: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) {
         let trie_entries: Vec<_> = entries.into_iter().filter_map(|(slot_hash, value)| {
-            let trimmed: Vec<u8> = value.iter().skip_while(|&&b| b == 0).copied().collect();
-            if trimmed.is_empty() {
-                None // Skip zero values (they're deletions)
-            } else {
-                Some((slot_hash, trimmed))
-            }
+            Self::rlp_encode_storage_value(&value).map(|rlp_value| (slot_hash, rlp_value))
         }).collect();
         self.trie.insert_batch_prehashed(trie_entries);
     }
@@ -472,9 +511,13 @@ impl AccountData {
         }
     }
 
-    /// RLP encodes the account data.
+    /// RLP encodes the account data for storage in the state trie.
+    /// Uses full 32-byte encoding for storage_root and code_hash (not slim encoding).
+    /// Note: Slim encoding (0x80 for empty hashes) is only for snap protocol wire format,
+    /// the state trie stores full 32-byte hashes.
     pub fn encode(&self) -> Vec<u8> {
         use crate::merkle::RlpEncoder;
+
         let mut enc = RlpEncoder::new();
         enc.encode_list(|e| {
             e.encode_u64(self.nonce);
@@ -485,7 +528,9 @@ impl AccountData {
             } else {
                 e.encode_bytes(&balance_trimmed);
             }
+            // Encode storage_root - always full 32 bytes for state trie
             e.encode_bytes(&self.storage_root);
+            // Encode code_hash - always full 32 bytes for state trie
             e.encode_bytes(&self.code_hash);
         });
         enc.into_bytes()
@@ -516,10 +561,11 @@ impl AccountData {
         let offset = 32 - balance.len().min(32);
         balance_arr[offset..].copy_from_slice(&balance[..balance.len().min(32)]);
 
-        // Decode storage_root
+        // Decode storage_root - default to EMPTY_ROOT for slim encoding compatibility
         let (storage, len) = Self::decode_bytes(&data[pos..]);
         pos += len;
-        let mut storage_root = [0u8; 32];
+        use crate::merkle::EMPTY_ROOT;
+        let mut storage_root = EMPTY_ROOT;
         if storage.len() == 32 {
             storage_root.copy_from_slice(&storage);
         }
@@ -1021,6 +1067,26 @@ impl PagedStateTrie {
     pub fn update_account_storage_root(&mut self, address_hash: &[u8; 32], storage_root: [u8; 32]) {
         self.state.update_account_storage_root(address_hash, storage_root);
     }
+
+    /// Debug: dumps the first N accounts for inspection.
+    /// Used to debug state root mismatches.
+    pub fn debug_dump_accounts(&self, count: usize) {
+        for (i, (key, value)) in self.state.trie.iter().enumerate() {
+            if i >= count {
+                break;
+            }
+            // Decode account data
+            let account = AccountData::decode(&value);
+            eprintln!(
+                "[DEBUG] Account {}: hash={:02x?}, nonce={}, storage_root={:02x?}, code_hash={:02x?}",
+                i,
+                key,
+                account.nonce,
+                account.storage_root,
+                account.code_hash
+            );
+        }
+    }
 }
 
 impl Default for PagedStateTrie {
@@ -1096,6 +1162,40 @@ mod tests {
 
         assert_eq!(decoded.nonce, 42);
         assert_eq!(decoded.balance[31], 100);
+        // Critical: verify EMPTY_ROOT and EMPTY_CODE_HASH roundtrip correctly
+        // (slim encoding encodes these as 0x80, decode must restore original values)
+        assert_eq!(decoded.storage_root, EMPTY_ROOT, "storage_root should decode to EMPTY_ROOT");
+        assert_eq!(decoded.code_hash, AccountData::EMPTY_CODE_HASH, "code_hash should decode to EMPTY_CODE_HASH");
+
+        // Verify re-encoding produces identical bytes (idempotent roundtrip)
+        let re_encoded = decoded.encode();
+        assert_eq!(encoded, re_encoded, "encode/decode should be idempotent");
+    }
+
+    #[test]
+    fn test_account_data_full_encoding_roundtrip() {
+        // Test that full encoding works correctly for accounts with empty storage/code
+        // Note: State trie uses full 32-byte encoding for storage_root and code_hash,
+        // NOT slim encoding. Slim encoding (0x80 for empty hashes) is only for snap protocol.
+        let account = AccountData {
+            nonce: 1,
+            balance: [0u8; 32],
+            storage_root: EMPTY_ROOT,
+            code_hash: AccountData::EMPTY_CODE_HASH,
+        };
+
+        let encoded = account.encode();
+        // Full encoding: storage_root and code_hash are always 32 bytes each
+        // Expected length: ~70 bytes (RLP list header + nonce + balance + 32 + 32)
+        assert!(encoded.len() >= 66, "Full encoding should include 32-byte hashes");
+
+        let decoded = AccountData::decode(&encoded);
+        assert_eq!(decoded.storage_root, EMPTY_ROOT);
+        assert_eq!(decoded.code_hash, AccountData::EMPTY_CODE_HASH);
+
+        // Re-encode and verify idempotency
+        let re_encoded = decoded.encode();
+        assert_eq!(encoded, re_encoded, "full encoding roundtrip should be idempotent");
     }
 
     #[test]
@@ -1113,6 +1213,43 @@ mod tests {
         state.set_account(&address, account);
         let retrieved = state.get_account(&address).unwrap();
         assert_eq!(retrieved.nonce, 1);
+    }
+
+    #[test]
+    fn test_storage_value_rlp_encoding() {
+        // Test RLP encoding of storage values
+        // This is critical for state root compatibility with Ethereum
+
+        // Value 1 = 0x01 (single byte < 0x80, encodes as itself)
+        let mut value = [0u8; 32];
+        value[31] = 1;
+        let encoded = StorageTrie::rlp_encode_storage_value(&value).unwrap();
+        assert_eq!(encoded, vec![0x01], "Value 1 should encode as single byte");
+
+        // Value 127 = 0x7f (single byte < 0x80, encodes as itself)
+        value[31] = 127;
+        let encoded = StorageTrie::rlp_encode_storage_value(&value).unwrap();
+        assert_eq!(encoded, vec![0x7f], "Value 127 should encode as single byte");
+
+        // Value 128 = 0x80 (single byte >= 0x80, needs prefix)
+        value[31] = 128;
+        let encoded = StorageTrie::rlp_encode_storage_value(&value).unwrap();
+        assert_eq!(encoded, vec![0x81, 0x80], "Value 128 should have length prefix");
+
+        // Value 255 = 0xff (single byte >= 0x80, needs prefix)
+        value[31] = 255;
+        let encoded = StorageTrie::rlp_encode_storage_value(&value).unwrap();
+        assert_eq!(encoded, vec![0x81, 0xff], "Value 255 should have length prefix");
+
+        // Value 256 = 0x0100 (2 bytes)
+        value[31] = 0;
+        value[30] = 1;
+        let encoded = StorageTrie::rlp_encode_storage_value(&value).unwrap();
+        assert_eq!(encoded, vec![0x82, 0x01, 0x00], "Value 256 should encode as 2 bytes with prefix");
+
+        // Zero value = deletion (returns None)
+        let value = [0u8; 32];
+        assert!(StorageTrie::rlp_encode_storage_value(&value).is_none(), "Zero value should return None");
     }
 
     #[test]
