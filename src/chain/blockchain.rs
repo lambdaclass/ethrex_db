@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::block::{Block, BlockId};
 use super::world_state::Account;
-use crate::store::{PagedDb, DbError, PagedStateTrie, AccountData, CommitOptions};
+use crate::store::{PagedDb, DbError, PagedStateTrie, AccountData, CommitOptions, CodeStore};
 
 /// Blockchain errors.
 #[derive(Error, Debug)]
@@ -55,6 +55,10 @@ pub struct Blockchain {
     last_finalized: RwLock<u64>,
     /// The last finalized block hash.
     last_finalized_hash: RwLock<H256>,
+    /// Contract bytecode storage for finalized state.
+    code_store: RwLock<CodeStore>,
+    /// Hot code storage (code added in uncommitted blocks).
+    hot_code: RwLock<HashMap<[u8; 32], Vec<u8>>>,
 }
 
 /// Converts chain Account to trie AccountData.
@@ -98,6 +102,8 @@ impl Blockchain {
             blocks_by_number: RwLock::new(HashMap::new()),
             last_finalized: RwLock::new(block_number),
             last_finalized_hash: RwLock::new(block_hash),
+            code_store: RwLock::new(CodeStore::new()),
+            hot_code: RwLock::new(HashMap::new()),
         }
     }
 
@@ -116,6 +122,8 @@ impl Blockchain {
             blocks_by_number: RwLock::new(HashMap::new()),
             last_finalized: RwLock::new(block_number),
             last_finalized_hash: RwLock::new(block_hash),
+            code_store: RwLock::new(CodeStore::new()),
+            hot_code: RwLock::new(HashMap::new()),
         }
     }
 
@@ -412,6 +420,9 @@ impl Blockchain {
             }
         }
 
+        // Finalize hot code storage
+        self.finalize_code();
+
         // Update finalized state
         *self.last_finalized.write().unwrap() = block_number;
         *self.last_finalized_hash.write().unwrap() = block_hash;
@@ -442,6 +453,81 @@ impl Blockchain {
         let trie = self.state_trie.read().unwrap();
         trie.get_storage_by_hash(address_hash, slot_hash)
             .map(|bytes| U256::from_big_endian(&bytes))
+    }
+
+    // ========================================================================
+    // Code Storage Methods
+    // ========================================================================
+
+    /// Stores contract bytecode.
+    ///
+    /// Code is stored in hot storage until the block is finalized,
+    /// then moved to the persistent code store.
+    pub fn store_code(&self, code_hash: [u8; 32], code: Vec<u8>) {
+        // Skip empty code
+        if code_hash == AccountData::EMPTY_CODE_HASH || code.is_empty() {
+            return;
+        }
+        self.hot_code.write().unwrap().insert(code_hash, code);
+    }
+
+    /// Retrieves contract bytecode by hash.
+    ///
+    /// First checks hot storage (uncommitted code), then finalized storage.
+    pub fn get_code(&self, code_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        // Empty code hash returns empty code
+        if *code_hash == AccountData::EMPTY_CODE_HASH {
+            return Some(Vec::new());
+        }
+
+        // Check hot storage first
+        if let Some(code) = self.hot_code.read().unwrap().get(code_hash) {
+            return Some(code.clone());
+        }
+
+        // Check finalized storage
+        self.code_store.read().unwrap().get(code_hash).map(|c| c.to_vec())
+    }
+
+    /// Checks if code exists for a given hash.
+    pub fn has_code(&self, code_hash: &[u8; 32]) -> bool {
+        if *code_hash == AccountData::EMPTY_CODE_HASH {
+            return true;
+        }
+        self.hot_code.read().unwrap().contains_key(code_hash)
+            || self.code_store.read().unwrap().contains(code_hash)
+    }
+
+    /// Stores multiple code entries in batch.
+    pub fn store_code_batch(&self, entries: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
+        let mut hot_code = self.hot_code.write().unwrap();
+        for (code_hash, code) in entries {
+            if code_hash != AccountData::EMPTY_CODE_HASH && !code.is_empty() {
+                hot_code.insert(code_hash, code);
+            }
+        }
+    }
+
+    /// Moves hot code to finalized storage.
+    ///
+    /// Called internally during finalization to persist code.
+    fn finalize_code(&self) {
+        let mut hot_code = self.hot_code.write().unwrap();
+        let mut code_store = self.code_store.write().unwrap();
+
+        for (code_hash, code) in hot_code.drain() {
+            code_store.store(code_hash, code);
+        }
+    }
+
+    /// Returns the number of hot (uncommitted) code entries.
+    pub fn hot_code_count(&self) -> usize {
+        self.hot_code.read().unwrap().len()
+    }
+
+    /// Returns the number of finalized code entries.
+    pub fn finalized_code_count(&self) -> usize {
+        self.code_store.read().unwrap().len()
     }
 
     /// Returns the number of committed (non-finalized) blocks.

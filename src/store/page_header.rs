@@ -21,6 +21,8 @@ pub enum PageType {
     StateRoot = 4,
     /// Storage fanout page.
     StorageFanout = 5,
+    /// Code storage page for contract bytecode.
+    Code = 6,
 }
 
 impl PageType {
@@ -32,6 +34,7 @@ impl PageType {
             3 => Some(PageType::Abandoned),
             4 => Some(PageType::StateRoot),
             5 => Some(PageType::StorageFanout),
+            6 => Some(PageType::Code),
             _ => None,
         }
     }

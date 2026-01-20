@@ -25,6 +25,7 @@ impl BlockId {
 ///
 /// Blocks form a tree structure where each block has a parent.
 /// Multiple blocks can share the same parent (for parallel block creation).
+#[derive(Debug)]
 pub struct Block {
     /// Block identifier.
     pub id: BlockId,

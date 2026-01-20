@@ -6,23 +6,23 @@ description = "A Paprika-inspired Ethereum state storage engine for ethrex"
 license = "MIT"
 
 [dependencies]
-memmap2.workspace = true
-tiny-keccak.workspace = true
-rlp.workspace = true
-primitive-types.workspace = true
-parking_lot.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
+memmap2 = "0.9"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+rlp = "0.6"
+primitive-types = { version = "0.13", features = ["rlp"] }
+parking_lot = "0.12"
+thiserror = "2.0"
+tracing = "0.1"
 wide = "0.7"  # Used in benchmarks for SIMD comparison
-rayon.workspace = true
+rayon = "1.10"
 lru = "0.12"  # LRU page cache for performance
 hashbrown = { version = "0.15", features = ["rayon"] }  # Faster HashMap with parallel iteration
 rustc-hash = "2.1"  # FxHash - fast non-cryptographic hash for known-good keys
 
 [dev-dependencies]
 proptest = "1.4"
-tempfile.workspace = true
-hex.workspace = true
+tempfile = "3.8"
+hex = "0.4"
 hex-literal = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

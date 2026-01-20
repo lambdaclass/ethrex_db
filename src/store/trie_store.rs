@@ -654,6 +654,136 @@ impl AccountData {
 }
 
 // ============================================================================
+// CodeStore - Contract bytecode storage
+// ============================================================================
+
+/// Storage for contract bytecode.
+///
+/// Keys are code_hash (keccak256 of bytecode), values are the raw bytecode.
+/// This provides O(1) lookups for contract code by hash.
+pub struct CodeStore {
+    /// In-memory code storage (code_hash -> bytecode)
+    codes: HashMap<[u8; 32], Vec<u8>>,
+}
+
+impl CodeStore {
+    /// Creates a new empty code store.
+    pub fn new() -> Self {
+        Self {
+            codes: HashMap::new(),
+        }
+    }
+
+    /// Stores contract bytecode.
+    ///
+    /// The code_hash must be keccak256(code). This is NOT verified.
+    pub fn store(&mut self, code_hash: [u8; 32], code: Vec<u8>) {
+        // Don't store empty code hash
+        if code_hash != AccountData::EMPTY_CODE_HASH && !code.is_empty() {
+            self.codes.insert(code_hash, code);
+        }
+    }
+
+    /// Retrieves contract bytecode by hash.
+    pub fn get(&self, code_hash: &[u8; 32]) -> Option<&[u8]> {
+        // Empty code hash returns empty code
+        if *code_hash == AccountData::EMPTY_CODE_HASH {
+            return Some(&[]);
+        }
+        self.codes.get(code_hash).map(|v| v.as_slice())
+    }
+
+    /// Checks if code exists for a given hash.
+    pub fn contains(&self, code_hash: &[u8; 32]) -> bool {
+        *code_hash == AccountData::EMPTY_CODE_HASH || self.codes.contains_key(code_hash)
+    }
+
+    /// Returns the number of stored code entries.
+    pub fn len(&self) -> usize {
+        self.codes.len()
+    }
+
+    /// Returns true if no code is stored.
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+
+    /// Returns an iterator over all (code_hash, code) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8; 32], &[u8])> {
+        self.codes.iter().map(|(k, v)| (k, v.as_slice()))
+    }
+
+    /// Batch insert multiple code entries.
+    pub fn store_batch(&mut self, entries: impl IntoIterator<Item = ([u8; 32], Vec<u8>)>) {
+        for (code_hash, code) in entries {
+            self.store(code_hash, code);
+        }
+    }
+
+    /// Serializes the code store for persistence.
+    ///
+    /// Format: [count: u32] [entry...]
+    /// Each entry: [code_hash: 32 bytes] [code_len: u32] [code: code_len bytes]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Write count
+        bytes.extend_from_slice(&(self.codes.len() as u32).to_le_bytes());
+
+        // Write entries
+        for (code_hash, code) in &self.codes {
+            bytes.extend_from_slice(code_hash);
+            bytes.extend_from_slice(&(code.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(code);
+        }
+
+        bytes
+    }
+
+    /// Deserializes a code store from bytes.
+    pub fn from_bytes(data: &[u8]) -> Self {
+        let mut store = Self::new();
+
+        if data.len() < 4 {
+            return store;
+        }
+
+        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut pos = 4;
+
+        for _ in 0..count {
+            if pos + 36 > data.len() {
+                break;
+            }
+
+            let mut code_hash = [0u8; 32];
+            code_hash.copy_from_slice(&data[pos..pos + 32]);
+            pos += 32;
+
+            let code_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            if pos + code_len > data.len() {
+                break;
+            }
+
+            let code = data[pos..pos + code_len].to_vec();
+            pos += code_len;
+
+            store.codes.insert(code_hash, code);
+        }
+
+        store
+    }
+}
+
+impl Default for CodeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // PagedStateTrie - Full integration with PagedDb
 // ============================================================================
 
@@ -1388,5 +1518,81 @@ mod tests {
         assert_eq!(loaded.get(b"key1"), Some(b"value1".to_vec()));
         assert_eq!(loaded.get(b"key2"), Some(b"value2".to_vec()));
         assert_eq!(loaded.get(b"another_key"), Some(b"another_value".to_vec()));
+    }
+
+    #[test]
+    fn test_code_store_basic() {
+        let mut store = CodeStore::new();
+        assert!(store.is_empty());
+
+        // Create a fake code hash (in practice this would be keccak256 of code)
+        let code = b"contract code".to_vec();
+        let code_hash = [0x42u8; 32];
+
+        store.store(code_hash, code.clone());
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 1);
+
+        let retrieved = store.get(&code_hash);
+        assert_eq!(retrieved, Some(code.as_slice()));
+    }
+
+    #[test]
+    fn test_code_store_empty_code_hash() {
+        let store = CodeStore::new();
+
+        // Empty code hash should always return empty code
+        assert!(store.contains(&AccountData::EMPTY_CODE_HASH));
+        assert_eq!(store.get(&AccountData::EMPTY_CODE_HASH), Some([].as_slice()));
+    }
+
+    #[test]
+    fn test_code_store_batch() {
+        let mut store = CodeStore::new();
+
+        let entries = vec![
+            ([1u8; 32], b"code1".to_vec()),
+            ([2u8; 32], b"code2".to_vec()),
+            ([3u8; 32], b"code3".to_vec()),
+        ];
+
+        store.store_batch(entries);
+        assert_eq!(store.len(), 3);
+
+        assert!(store.contains(&[1u8; 32]));
+        assert!(store.contains(&[2u8; 32]));
+        assert!(store.contains(&[3u8; 32]));
+        assert!(!store.contains(&[4u8; 32]));
+    }
+
+    #[test]
+    fn test_code_store_serialization() {
+        let mut store = CodeStore::new();
+
+        store.store([1u8; 32], b"code1".to_vec());
+        store.store([2u8; 32], b"longer code here".to_vec());
+
+        // Serialize
+        let bytes = store.to_bytes();
+
+        // Deserialize
+        let loaded = CodeStore::from_bytes(&bytes);
+
+        assert_eq!(loaded.len(), store.len());
+        assert_eq!(loaded.get(&[1u8; 32]), Some(b"code1".as_slice()));
+        assert_eq!(loaded.get(&[2u8; 32]), Some(b"longer code here".as_slice()));
+    }
+
+    #[test]
+    fn test_code_store_does_not_store_empty() {
+        let mut store = CodeStore::new();
+
+        // Empty code hash should not be stored
+        store.store(AccountData::EMPTY_CODE_HASH, Vec::new());
+        assert!(store.is_empty());
+
+        // Empty code with non-empty hash should not be stored
+        store.store([1u8; 32], Vec::new());
+        assert!(store.is_empty());
     }
 }
